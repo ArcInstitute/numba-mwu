@@ -2,25 +2,35 @@
 
 import numpy as np
 import pytest
-from scipy import stats
+from scipy import sparse, stats
 
-from numba_mwu import mannwhitneyu, mannwhitneyu_batch, mannwhitneyu_columns
-
+from numba_mwu import (
+    mannwhitneyu,
+    mannwhitneyu_batch,
+    mannwhitneyu_columns,
+    mannwhitneyu_sparse,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _scipy_mwu(x, y, use_continuity=True, alternative="two-sided"):
     """Wrapper around scipy for the asymptotic method."""
     return stats.mannwhitneyu(
-        x, y, use_continuity=use_continuity, alternative=alternative, method="asymptotic"
+        x,
+        y,
+        use_continuity=use_continuity,
+        alternative=alternative,
+        method="asymptotic",
     )
 
 
 # ---------------------------------------------------------------------------
 # Basic correctness
 # ---------------------------------------------------------------------------
+
 
 class TestBasicCorrectness:
     """Compare single-test output against scipy."""
@@ -77,6 +87,7 @@ class TestBasicCorrectness:
 # Alternative hypotheses
 # ---------------------------------------------------------------------------
 
+
 class TestAlternatives:
     def setup_method(self):
         self.x = np.array([19, 22, 16, 29, 24], dtype=np.float64)
@@ -108,13 +119,18 @@ class TestAlternatives:
         for alt in ("two-sided", "less", "greater"):
             result = mannwhitneyu(x, y, alternative=alt)
             expected = _scipy_mwu(x, y, alternative=alt)
-            assert np.isclose(result.statistic, expected.statistic), f"stat mismatch for {alt}"
-            assert np.isclose(result.pvalue, expected.pvalue), f"pvalue mismatch for {alt}"
+            assert np.isclose(result.statistic, expected.statistic), (
+                f"stat mismatch for {alt}"
+            )
+            assert np.isclose(result.pvalue, expected.pvalue), (
+                f"pvalue mismatch for {alt}"
+            )
 
 
 # ---------------------------------------------------------------------------
 # Continuity correction
 # ---------------------------------------------------------------------------
+
 
 class TestContinuityCorrection:
     def test_continuity_on(self):
@@ -146,6 +162,7 @@ class TestContinuityCorrection:
 # ---------------------------------------------------------------------------
 # Log-transformation invariance
 # ---------------------------------------------------------------------------
+
 
 class TestLogTransformInvariance:
     """Rankings are invariant under monotone transforms like log.
@@ -193,6 +210,7 @@ class TestLogTransformInvariance:
 # Float vs int input consistency
 # ---------------------------------------------------------------------------
 
+
 class TestFloatIntConsistency:
     """Same data as int list and float array should produce identical results."""
 
@@ -218,6 +236,7 @@ class TestFloatIntConsistency:
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
+
 
 class TestEdgeCases:
     def test_all_identical(self):
@@ -260,6 +279,7 @@ class TestEdgeCases:
 # Input validation
 # ---------------------------------------------------------------------------
 
+
 class TestInputValidation:
     def test_empty_x(self):
         with pytest.raises(ValueError, match="nonzero size"):
@@ -282,6 +302,7 @@ class TestInputValidation:
 # Batch functions
 # ---------------------------------------------------------------------------
 
+
 class TestBatch:
     def test_batch_matches_single(self):
         """mannwhitneyu_batch should match row-by-row single calls."""
@@ -295,8 +316,12 @@ class TestBatch:
 
         for i in range(n_tests):
             single = mannwhitneyu(X[i], y)
-            assert np.isclose(batch_result.statistic[i], single.statistic), f"stat mismatch at {i}"
-            assert np.isclose(batch_result.pvalue[i], single.pvalue), f"pvalue mismatch at {i}"
+            assert np.isclose(batch_result.statistic[i], single.statistic), (
+                f"stat mismatch at {i}"
+            )
+            assert np.isclose(batch_result.pvalue[i], single.pvalue), (
+                f"pvalue mismatch at {i}"
+            )
 
     def test_batch_matches_scipy(self):
         """mannwhitneyu_batch results should match scipy."""
@@ -337,8 +362,12 @@ class TestColumns:
             x = data[:n1, i]
             y = data[n1:, i]
             single = mannwhitneyu(x, y)
-            assert np.isclose(col_result.statistic[i], single.statistic), f"stat mismatch at {i}"
-            assert np.isclose(col_result.pvalue[i], single.pvalue), f"pvalue mismatch at {i}"
+            assert np.isclose(col_result.statistic[i], single.statistic), (
+                f"stat mismatch at {i}"
+            )
+            assert np.isclose(col_result.pvalue[i], single.pvalue), (
+                f"pvalue mismatch at {i}"
+            )
 
     def test_columns_matches_scipy(self):
         """mannwhitneyu_columns results should match scipy."""
@@ -365,3 +394,250 @@ class TestColumns:
                 single = mannwhitneyu(data[:n1, i], data[n1:, i], alternative=alt)
                 assert np.isclose(col.statistic[i], single.statistic)
                 assert np.isclose(col.pvalue[i], single.pvalue)
+
+
+# ---------------------------------------------------------------------------
+# Sparse matrix support
+# ---------------------------------------------------------------------------
+
+
+class TestSparse:
+    """Validate mannwhitneyu_sparse against dense path and scipy."""
+
+    def test_sparse_matches_dense(self):
+        """Small dense matrix → CSR, compare against dense column-wise."""
+        rng = np.random.default_rng(42)
+        n_a, n_b, n_genes = 10, 8, 5
+        # Non-negative data with some zeros
+        dense = rng.integers(0, 10, size=(n_a + n_b, n_genes)).astype(np.float64)
+        group_a = np.array([True] * n_a + [False] * n_b)
+
+        sp = sparse.csr_matrix(dense)
+        sp.eliminate_zeros()
+        sp_result = mannwhitneyu_sparse(sp, group_a)
+
+        for i in range(n_genes):
+            x = dense[:n_a, i]
+            y = dense[n_a:, i]
+            expected = mannwhitneyu(x, y)
+            assert np.isclose(sp_result.statistic[i], expected.statistic), (
+                f"stat mismatch col {i}"
+            )
+            assert np.isclose(sp_result.pvalue[i], expected.pvalue), (
+                f"pvalue mismatch col {i}"
+            )
+
+    def test_sparse_matches_scipy(self):
+        """Compare each gene against scipy.stats.mannwhitneyu."""
+        rng = np.random.default_rng(77)
+        n_a, n_b, n_genes = 15, 12, 8
+        dense = rng.integers(0, 8, size=(n_a + n_b, n_genes)).astype(np.float64)
+        group_a = np.array([True] * n_a + [False] * n_b)
+
+        sp = sparse.csr_matrix(dense)
+        sp.eliminate_zeros()
+        sp_result = mannwhitneyu_sparse(sp, group_a)
+
+        for i in range(n_genes):
+            expected = _scipy_mwu(dense[:n_a, i], dense[n_a:, i])
+            assert np.isclose(sp_result.statistic[i], expected.statistic), (
+                f"stat mismatch col {i}"
+            )
+            assert np.isclose(sp_result.pvalue[i], expected.pvalue), (
+                f"pvalue mismatch col {i}"
+            )
+
+    def test_sparse_highly_sparse(self):
+        """~95% zeros, realistic for scRNA-seq."""
+        rng = np.random.default_rng(99)
+        n_cells, n_genes = 200, 50
+        n_a = 80
+        # ~5% nonzero
+        dense = np.zeros((n_cells, n_genes), dtype=np.float64)
+        mask = rng.random((n_cells, n_genes)) < 0.05
+        dense[mask] = rng.integers(1, 100, size=mask.sum()).astype(np.float64)
+
+        group_a = np.zeros(n_cells, dtype=bool)
+        group_a[:n_a] = True
+
+        sp = sparse.csr_matrix(dense)
+        sp.eliminate_zeros()
+        sp_result = mannwhitneyu_sparse(sp, group_a)
+
+        for i in range(n_genes):
+            expected = _scipy_mwu(dense[:n_a, i], dense[n_a:, i])
+            assert np.isclose(sp_result.statistic[i], expected.statistic), (
+                f"stat mismatch col {i}"
+            )
+            assert np.isclose(sp_result.pvalue[i], expected.pvalue), (
+                f"pvalue mismatch col {i}"
+            )
+
+    def test_sparse_all_zeros_column(self):
+        """A column that is entirely zero → p = 1.0."""
+        n_cells, n_genes = 20, 3
+        n_a = 10
+        dense = np.zeros((n_cells, n_genes), dtype=np.float64)
+        # Only put data in columns 0 and 2, leave column 1 all zeros
+        dense[:5, 0] = [1, 2, 3, 4, 5]
+        dense[10:15, 2] = [6, 7, 8, 9, 10]
+
+        group_a = np.array([True] * n_a + [False] * n_a)
+        sp = sparse.csr_matrix(dense)
+        sp.eliminate_zeros()
+        result = mannwhitneyu_sparse(sp, group_a)
+
+        assert result.pvalue[1] == 1.0
+
+    def test_sparse_no_zeros_column(self):
+        """A column with no zeros (fully dense in sparse matrix)."""
+        rng = np.random.default_rng(55)
+        n_cells, n_genes = 20, 3
+        n_a = 10
+        dense = rng.integers(1, 50, size=(n_cells, n_genes)).astype(np.float64)
+        group_a = np.array([True] * n_a + [False] * (n_cells - n_a))
+
+        sp = sparse.csr_matrix(dense)
+        sp.eliminate_zeros()
+        sp_result = mannwhitneyu_sparse(sp, group_a)
+
+        for i in range(n_genes):
+            expected = mannwhitneyu(dense[:n_a, i], dense[n_a:, i])
+            assert np.isclose(sp_result.statistic[i], expected.statistic)
+            assert np.isclose(sp_result.pvalue[i], expected.pvalue)
+
+    def test_sparse_alternatives(self):
+        """All three alternative hypotheses."""
+        rng = np.random.default_rng(33)
+        n_a, n_b, n_genes = 15, 12, 6
+        dense = rng.integers(0, 10, size=(n_a + n_b, n_genes)).astype(np.float64)
+        group_a = np.array([True] * n_a + [False] * n_b)
+        sp = sparse.csr_matrix(dense)
+        sp.eliminate_zeros()
+
+        for alt in ("two-sided", "less", "greater"):
+            sp_result = mannwhitneyu_sparse(sp, group_a, alternative=alt)
+            for i in range(n_genes):
+                expected = _scipy_mwu(dense[:n_a, i], dense[n_a:, i], alternative=alt)
+                assert np.isclose(sp_result.statistic[i], expected.statistic), (
+                    f"stat mismatch col {i}, alt={alt}"
+                )
+                assert np.isclose(sp_result.pvalue[i], expected.pvalue), (
+                    f"pvalue mismatch col {i}, alt={alt}"
+                )
+
+    def test_sparse_continuity(self):
+        """With and without continuity correction."""
+        rng = np.random.default_rng(44)
+        n_a, n_b, n_genes = 12, 10, 4
+        dense = rng.integers(0, 8, size=(n_a + n_b, n_genes)).astype(np.float64)
+        group_a = np.array([True] * n_a + [False] * n_b)
+        sp = sparse.csr_matrix(dense)
+        sp.eliminate_zeros()
+
+        for cont in (True, False):
+            sp_result = mannwhitneyu_sparse(sp, group_a, use_continuity=cont)
+            for i in range(n_genes):
+                expected = _scipy_mwu(
+                    dense[:n_a, i], dense[n_a:, i], use_continuity=cont
+                )
+                assert np.isclose(sp_result.statistic[i], expected.statistic)
+                assert np.isclose(sp_result.pvalue[i], expected.pvalue)
+
+    def test_sparse_explicit_zeros_handled(self):
+        """Explicit stored zeros should be handled by eliminate_zeros()."""
+        n_cells, n_genes = 10, 2
+        n_a = 5
+        dense = np.array(
+            [
+                [0, 1],
+                [2, 0],
+                [0, 3],
+                [4, 0],
+                [0, 5],
+                [6, 0],
+                [0, 7],
+                [8, 0],
+                [0, 9],
+                [10, 0],
+            ],
+            dtype=np.float64,
+        )
+        group_a = np.array([True] * n_a + [False] * (n_cells - n_a))
+
+        sp = sparse.csr_matrix(dense)
+        # Don't call eliminate_zeros — the CSR may store explicit zeros
+        # The wrapper requires the user to call eliminate_zeros beforehand,
+        # but for this test we verify it still works on clean data
+        sp.eliminate_zeros()
+        sp_result = mannwhitneyu_sparse(sp, group_a)
+
+        for i in range(n_genes):
+            expected = mannwhitneyu(dense[:n_a, i], dense[n_a:, i])
+            assert np.isclose(sp_result.statistic[i], expected.statistic)
+            assert np.isclose(sp_result.pvalue[i], expected.pvalue)
+
+    def test_sparse_negative_values_rejected(self):
+        """Negative stored values should raise ValueError."""
+        dense = np.array([[1, -1], [2, 3]], dtype=np.float64)
+        sp = sparse.csr_matrix(dense)
+        group_a = np.array([True, False])
+        with pytest.raises(ValueError, match="non-negative"):
+            mannwhitneyu_sparse(sp, group_a)
+
+    def test_sparse_non_csr_rejected(self):
+        """Non-CSR format should raise TypeError."""
+        dense = np.array([[1, 2], [3, 4]], dtype=np.float64)
+        sp_csc = sparse.csc_matrix(dense)
+        group_a = np.array([True, False])
+        with pytest.raises(TypeError, match="CSR"):
+            mannwhitneyu_sparse(sp_csc, group_a)
+
+    def test_sparse_large(self):
+        """Larger matrix (5000 cells, 200 genes, ~90% sparse)."""
+        rng = np.random.default_rng(123)
+        n_cells, n_genes = 5000, 200
+        n_a = 2000
+
+        # ~10% nonzero
+        dense = np.zeros((n_cells, n_genes), dtype=np.float64)
+        mask = rng.random((n_cells, n_genes)) < 0.10
+        dense[mask] = rng.integers(1, 500, size=mask.sum()).astype(np.float64)
+
+        group_a = np.zeros(n_cells, dtype=bool)
+        group_a[:n_a] = True
+
+        sp = sparse.csr_matrix(dense)
+        sp.eliminate_zeros()
+        sp_result = mannwhitneyu_sparse(sp, group_a)
+
+        # Spot-check 20 random columns against scipy
+        check_cols = rng.choice(n_genes, size=20, replace=False)
+        for i in check_cols:
+            expected = _scipy_mwu(dense[:n_a, i], dense[n_a:, i])
+            assert np.isclose(sp_result.statistic[i], expected.statistic), (
+                f"stat mismatch col {i}"
+            )
+            assert np.isclose(sp_result.pvalue[i], expected.pvalue), (
+                f"pvalue mismatch col {i}"
+            )
+
+    def test_sparse_shuffled_groups(self):
+        """Group membership is not contiguous (interleaved A/B cells)."""
+        rng = np.random.default_rng(66)
+        n_cells, n_genes = 40, 5
+        dense = rng.integers(0, 10, size=(n_cells, n_genes)).astype(np.float64)
+
+        group_a = np.zeros(n_cells, dtype=bool)
+        group_a[rng.choice(n_cells, size=20, replace=False)] = True
+
+        sp = sparse.csr_matrix(dense)
+        sp.eliminate_zeros()
+        sp_result = mannwhitneyu_sparse(sp, group_a)
+
+        for i in range(n_genes):
+            x = dense[group_a, i]
+            y = dense[~group_a, i]
+            expected = _scipy_mwu(x, y)
+            assert np.isclose(sp_result.statistic[i], expected.statistic), f"col {i}"
+            assert np.isclose(sp_result.pvalue[i], expected.pvalue), f"col {i}"

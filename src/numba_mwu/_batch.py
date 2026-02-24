@@ -25,7 +25,7 @@ def _mannwhitneyu_batch(X, y, use_continuity, alternative):
     n_tests = X.shape[0]
     U_out = np.empty(n_tests, dtype=np.float64)
     p_out = np.empty(n_tests, dtype=np.float64)
-    for i in nb.prange(n_tests):
+    for i in nb.prange(n_tests):  # type: ignore
         U_out[i], p_out[i] = _mannwhitneyu_single(
             X[i].copy(), y, use_continuity, alternative
         )
@@ -52,7 +52,7 @@ def _mannwhitneyu_columns(data, n1, use_continuity, alternative):
     n_tests = data.shape[1]
     U_out = np.empty(n_tests, dtype=np.float64)
     p_out = np.empty(n_tests, dtype=np.float64)
-    for i in nb.prange(n_tests):
+    for i in nb.prange(n_tests):  # type: ignore
         col = data[:, i].copy()  # ensure contiguous
         x = col[:n1]
         y = col[n1:]
