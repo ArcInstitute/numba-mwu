@@ -1,0 +1,22 @@
+[project]
+name = "numba-mwu"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Noam Teyssier", email = "22600644+noamteyssier@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "numba>=0.64.0",
+    "scipy>=1.17.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.22,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "marimo>=0.20.2",
+]
