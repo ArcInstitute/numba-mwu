@@ -1,7 +1,7 @@
 [project]
 name = "numba-mwu"
 version = "0.1.0"
-description = "Add your description here"
+description = "Numba-accelerated Mann-Whitney U test with sparse matrix support."
 readme = "README.md"
 authors = [
     { name = "Noam Teyssier", email = "22600644+noamteyssier@users.noreply.github.com" }
