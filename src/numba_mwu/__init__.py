@@ -128,9 +128,7 @@ def mannwhitneyu_columns(data, n1, use_continuity=True, alternative="two-sided")
         raise ValueError(f"`data` must be 2-dimensional, got ndim={data.ndim}")
     n1 = int(n1)
     if n1 <= 0 or n1 >= data.shape[0]:
-        raise ValueError(
-            f"`n1` must be between 1 and {data.shape[0] - 1}, got {n1}"
-        )
+        raise ValueError(f"`n1` must be between 1 and {data.shape[0] - 1}, got {n1}")
     if np.any(np.isnan(data)):
         raise ValueError("`data` must not contain NaNs.")
     alt = _validate_alternative(alternative)
@@ -177,8 +175,7 @@ def mannwhitneyu_sparse(X, group_a, use_continuity=True, alternative="two-sided"
         raise TypeError("`X` must be a scipy sparse matrix.")
     if not (isspmatrix_csr(X) or X.format == "csr"):
         raise TypeError(
-            "`X` must be in CSR format. "
-            "Convert with `X.tocsr()` if needed."
+            "`X` must be in CSR format. Convert with `X.tocsr()` if needed."
         )
 
     if X.data.size > 0 and X.data.min() < 0:
@@ -218,7 +215,14 @@ def mannwhitneyu_sparse(X, group_a, use_continuity=True, alternative="two-sided"
     row_indices = _expand_row_indices(csr_indptr)
 
     stats, pvals = _sparse_mwu_batch(
-        csr_data, row_indices, col_indptr, col_order,
-        n_cells, group_a, n_a, use_continuity, alt
+        csr_data,
+        row_indices,
+        col_indptr,
+        col_order,
+        n_cells,
+        group_a,
+        n_a,
+        use_continuity,
+        alt,
     )
     return MannWhitneyUResult(stats, pvals)
