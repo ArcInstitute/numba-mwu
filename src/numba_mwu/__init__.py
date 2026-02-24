@@ -6,7 +6,7 @@ import numpy as np
 
 from ._batch import _mannwhitneyu_batch, _mannwhitneyu_columns
 from ._core import GREATER, LESS, TWO_SIDED, _mannwhitneyu_single
-from ._sparse import _build_col_index, _expand_row_indices, _sparse_mwu_batch
+from ._sparse import _build_col_index, _sparse_mwu_batch
 
 __all__ = [
     "MannWhitneyUResult",
@@ -104,15 +104,29 @@ def mannwhitneyu_batch(X, y, use_continuity=True, alternative="two-sided"):
     return MannWhitneyUResult(stats, pvals)
 
 
-def mannwhitneyu_columns(data, n1, use_continuity=True, alternative="two-sided"):
-    """Run Mann-Whitney U test on each column, split at row n1 (parallelized).
+def _validate_2d(arr, name):
+    arr = np.asarray(arr, dtype=np.float64)
+    if arr.ndim != 2:
+        raise ValueError(f"`{name}` must be 2-dimensional, got ndim={arr.ndim}")
+    if arr.shape[0] == 0:
+        raise ValueError(f"`{name}` must have at least one row.")
+    if np.any(np.isnan(arr)):
+        raise ValueError(f"`{name}` must not contain NaNs.")
+    return arr
+
+
+def mannwhitneyu_columns(X, Y, use_continuity=True, alternative="two-sided"):
+    """Run Mann-Whitney U test on each column of X vs corresponding column of Y.
+
+    Designed for the common workflow where a matrix has been sliced by
+    group membership into two separate matrices (or views).
 
     Parameters
     ----------
-    data : array_like, shape (n1 + n2, n_tests)
-        2-D array where each column contains concatenated samples.
-    n1 : int
-        Number of rows belonging to the first sample.
+    X : array_like, shape (n1, n_genes)
+        2-D array for group A (one column per gene/feature).
+    Y : array_like, shape (n2, n_genes)
+        2-D array for group B. Must have the same number of columns as X.
     use_continuity : bool, optional
         Whether a continuity correction (1/2) should be applied. Default True.
     alternative : {'two-sided', 'less', 'greater'}, optional
@@ -121,28 +135,50 @@ def mannwhitneyu_columns(data, n1, use_continuity=True, alternative="two-sided")
     Returns
     -------
     result : MannWhitneyUResult
-        Named tuple with ``statistic`` and ``pvalue`` arrays of shape (n_tests,).
+        Named tuple with ``statistic`` and ``pvalue`` arrays of shape (n_genes,).
     """
-    data = np.asarray(data, dtype=np.float64)
-    if data.ndim != 2:
-        raise ValueError(f"`data` must be 2-dimensional, got ndim={data.ndim}")
-    n1 = int(n1)
-    if n1 <= 0 or n1 >= data.shape[0]:
-        raise ValueError(f"`n1` must be between 1 and {data.shape[0] - 1}, got {n1}")
-    if np.any(np.isnan(data)):
-        raise ValueError("`data` must not contain NaNs.")
+    X = _validate_2d(X, "X")
+    Y = _validate_2d(Y, "Y")
+    if X.shape[1] != Y.shape[1]:
+        raise ValueError(
+            f"`X` and `Y` must have the same number of columns, "
+            f"got {X.shape[1]} and {Y.shape[1]}."
+        )
     alt = _validate_alternative(alternative)
-    stats, pvals = _mannwhitneyu_columns(data, n1, use_continuity, alt)
+    stats, pvals = _mannwhitneyu_columns(X, Y, use_continuity, alt)
     return MannWhitneyUResult(stats, pvals)
 
 
-def mannwhitneyu_sparse(X, group_a, use_continuity=True, alternative="two-sided"):
-    """Run Mann-Whitney U test for each gene (column) of a sparse matrix.
+def _validate_csr(X, name):
+    from scipy.sparse import issparse, isspmatrix_csr
+
+    if not issparse(X):
+        raise TypeError(f"`{name}` must be a scipy sparse matrix.")
+    if not (isspmatrix_csr(X) or X.format == "csr"):
+        raise TypeError(
+            f"`{name}` must be in CSR format. Convert with `{name}.tocsr()` if needed."
+        )
+    if X.data.size > 0 and X.data.min() < 0:
+        raise ValueError(
+            f"Sparse MWU requires non-negative data in `{name}`. "
+            "For data with negative values, convert to dense and use "
+            "mannwhitneyu_columns."
+        )
+    return X
+
+
+def mannwhitneyu_sparse(X, Y, use_continuity=True, alternative="two-sided"):
+    """Run Mann-Whitney U test for each gene (column) of two sparse matrices.
 
     Designed for single-cell expression matrices where rows are cells and
-    columns are genes. Works directly with CSR format (the standard for
-    single-cell data) without converting to CSC — no copy of the data
-    array is made. The only allocation is a column-index permutation array
+    columns are genes. Each matrix represents one group — typically sliced
+    from a full expression matrix by cell labels::
+
+        X = full_matrix[labels == "A"]  # CSR row-slice is still CSR
+        Y = full_matrix[labels == "B"]
+
+    Works directly with CSR format without converting to CSC or dense.
+    The only allocation per matrix is a column-index permutation array
     (one int per nonzero entry) and column pointers (one int per gene).
 
     Requires non-negative data — zeros must be the smallest values so they
@@ -151,13 +187,13 @@ def mannwhitneyu_sparse(X, group_a, use_continuity=True, alternative="two-sided"
 
     Parameters
     ----------
-    X : scipy.sparse.csr_matrix or csr_array, shape (n_cells, n_genes)
-        Sparse expression matrix in CSR format. Must have non-negative
-        values. Call ``X.eliminate_zeros()`` beforehand if the matrix may
-        contain explicitly stored zeros.
-    group_a : array_like, shape (n_cells,)
-        Boolean mask indicating which cells belong to group A.
-        Group B is all cells where ``group_a`` is False.
+    X : scipy.sparse.csr_matrix or csr_array, shape (n1, n_genes)
+        Sparse expression matrix for group A in CSR format. Must have
+        non-negative values. Call ``X.eliminate_zeros()`` beforehand if
+        the matrix may contain explicitly stored zeros.
+    Y : scipy.sparse.csr_matrix or csr_array, shape (n2, n_genes)
+        Sparse expression matrix for group B in CSR format. Must have
+        the same number of columns as X.
     use_continuity : bool, optional
         Whether to apply continuity correction. Default True.
     alternative : {'two-sided', 'less', 'greater'}, optional
@@ -169,59 +205,44 @@ def mannwhitneyu_sparse(X, group_a, use_continuity=True, alternative="two-sided"
         Named tuple with ``statistic`` and ``pvalue`` arrays of shape
         (n_genes,).
     """
-    from scipy.sparse import issparse, isspmatrix_csr
+    X = _validate_csr(X, "X")
+    Y = _validate_csr(Y, "Y")
 
-    if not issparse(X):
-        raise TypeError("`X` must be a scipy sparse matrix.")
-    if not (isspmatrix_csr(X) or X.format == "csr"):
-        raise TypeError(
-            "`X` must be in CSR format. Convert with `X.tocsr()` if needed."
-        )
-
-    if X.data.size > 0 and X.data.min() < 0:
+    if X.shape[1] != Y.shape[1]:
         raise ValueError(
-            "Sparse MWU requires non-negative data. "
-            "For data with negative values, convert to dense and use "
-            "mannwhitneyu_columns."
+            f"`X` and `Y` must have the same number of columns, "
+            f"got {X.shape[1]} and {Y.shape[1]}."
         )
-
-    group_a = np.asarray(group_a, dtype=np.bool_)
-    if group_a.ndim != 1 or group_a.shape[0] != X.shape[0]:
-        raise ValueError(
-            f"`group_a` must be a 1-D boolean array with length {X.shape[0]}, "
-            f"got shape {group_a.shape}."
-        )
-
-    n_a = int(group_a.sum())
-    n_b = X.shape[0] - n_a
-    if n_a == 0 or n_b == 0:
-        raise ValueError("Both groups must have at least one member.")
+    if X.shape[0] == 0:
+        raise ValueError("`X` must have at least one row.")
+    if Y.shape[0] == 0:
+        raise ValueError("`Y` must have at least one row.")
 
     alt = _validate_alternative(alternative)
+    n_genes = X.shape[1]
+    n_a = X.shape[0]
+    n_b = Y.shape[0]
 
-    # Use the CSR arrays directly — no data copy
-    csr_indptr = np.ascontiguousarray(X.indptr)
-    csr_indices = np.ascontiguousarray(X.indices)
-    csr_data = np.ascontiguousarray(X.data, dtype=np.float64)
+    # Build column indices for each matrix — no data copy
+    data_a = np.ascontiguousarray(X.data, dtype=np.float64)
+    indptr_a = np.ascontiguousarray(X.indptr)
+    indices_a = np.ascontiguousarray(X.indices)
+    col_indptr_a, col_order_a = _build_col_index(indptr_a, indices_a, n_genes)
 
-    n_cells, n_genes = X.shape
-
-    # Build lightweight column index: permutation + column pointers
-    # Memory: nnz * 8 bytes (col_order) + (n_genes+1) * 8 bytes (col_indptr)
-    col_indptr, col_order = _build_col_index(csr_indptr, csr_indices, n_genes)
-
-    # Expand CSR indptr into flat row indices for O(1) row lookup
-    # Memory: nnz * 8 bytes
-    row_indices = _expand_row_indices(csr_indptr)
+    data_b = np.ascontiguousarray(Y.data, dtype=np.float64)
+    indptr_b = np.ascontiguousarray(Y.indptr)
+    indices_b = np.ascontiguousarray(Y.indices)
+    col_indptr_b, col_order_b = _build_col_index(indptr_b, indices_b, n_genes)
 
     stats, pvals = _sparse_mwu_batch(
-        csr_data,
-        row_indices,
-        col_indptr,
-        col_order,
-        n_cells,
-        group_a,
+        data_a,
+        col_indptr_a,
+        col_order_a,
         n_a,
+        data_b,
+        col_indptr_b,
+        col_order_b,
+        n_b,
         use_continuity,
         alt,
     )

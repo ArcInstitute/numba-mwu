@@ -353,15 +353,14 @@ class TestColumns:
     def test_columns_matches_single(self):
         """mannwhitneyu_columns should match column-by-column single calls."""
         rng = np.random.default_rng(42)
-        n1, n2, n_tests = 20, 15, 40
-        data = rng.standard_normal((n1 + n2, n_tests))
+        n1, n2, n_genes = 20, 15, 40
+        X = rng.standard_normal((n1, n_genes))
+        Y = rng.standard_normal((n2, n_genes))
 
-        col_result = mannwhitneyu_columns(data, n1)
+        col_result = mannwhitneyu_columns(X, Y)
 
-        for i in range(n_tests):
-            x = data[:n1, i]
-            y = data[n1:, i]
-            single = mannwhitneyu(x, y)
+        for i in range(n_genes):
+            single = mannwhitneyu(X[:, i], Y[:, i])
             assert np.isclose(col_result.statistic[i], single.statistic), (
                 f"stat mismatch at {i}"
             )
@@ -372,28 +371,43 @@ class TestColumns:
     def test_columns_matches_scipy(self):
         """mannwhitneyu_columns results should match scipy."""
         rng = np.random.default_rng(88)
-        n1, n2, n_tests = 12, 10, 15
-        data = rng.standard_normal((n1 + n2, n_tests))
+        n1, n2, n_genes = 12, 10, 15
+        X = rng.standard_normal((n1, n_genes))
+        Y = rng.standard_normal((n2, n_genes))
 
-        col_result = mannwhitneyu_columns(data, n1)
+        col_result = mannwhitneyu_columns(X, Y)
 
-        for i in range(n_tests):
-            x = data[:n1, i]
-            y = data[n1:, i]
-            expected = _scipy_mwu(x, y)
+        for i in range(n_genes):
+            expected = _scipy_mwu(X[:, i], Y[:, i])
             assert np.isclose(col_result.statistic[i], expected.statistic)
             assert np.isclose(col_result.pvalue[i], expected.pvalue)
 
     def test_columns_alternatives(self):
         rng = np.random.default_rng(44)
-        n1 = 10
-        data = rng.standard_normal((25, 8))
+        n1, n2 = 10, 15
+        X = rng.standard_normal((n1, 8))
+        Y = rng.standard_normal((n2, 8))
         for alt in ("two-sided", "less", "greater"):
-            col = mannwhitneyu_columns(data, n1, alternative=alt)
-            for i in range(data.shape[1]):
-                single = mannwhitneyu(data[:n1, i], data[n1:, i], alternative=alt)
+            col = mannwhitneyu_columns(X, Y, alternative=alt)
+            for i in range(X.shape[1]):
+                single = mannwhitneyu(X[:, i], Y[:, i], alternative=alt)
                 assert np.isclose(col.statistic[i], single.statistic)
                 assert np.isclose(col.pvalue[i], single.pvalue)
+
+    def test_columns_as_views(self):
+        """Slicing a matrix into two views should work (the primary use case)."""
+        rng = np.random.default_rng(55)
+        n1, n2, n_genes = 20, 30, 10
+        full = rng.standard_normal((n1 + n2, n_genes))
+        X = full[:n1]  # view, not copy
+        Y = full[n1:]  # view, not copy
+
+        col_result = mannwhitneyu_columns(X, Y)
+
+        for i in range(n_genes):
+            expected = _scipy_mwu(X[:, i], Y[:, i])
+            assert np.isclose(col_result.statistic[i], expected.statistic)
+            assert np.isclose(col_result.pvalue[i], expected.pvalue)
 
 
 # ---------------------------------------------------------------------------
@@ -405,21 +419,19 @@ class TestSparse:
     """Validate mannwhitneyu_sparse against dense path and scipy."""
 
     def test_sparse_matches_dense(self):
-        """Small dense matrix → CSR, compare against dense column-wise."""
+        """Small dense matrix → two CSR matrices, compare against dense."""
         rng = np.random.default_rng(42)
         n_a, n_b, n_genes = 10, 8, 5
-        # Non-negative data with some zeros
         dense = rng.integers(0, 10, size=(n_a + n_b, n_genes)).astype(np.float64)
-        group_a = np.array([True] * n_a + [False] * n_b)
 
-        sp = sparse.csr_matrix(dense)
-        sp.eliminate_zeros()
-        sp_result = mannwhitneyu_sparse(sp, group_a)
+        X_sp = sparse.csr_matrix(dense[:n_a])
+        Y_sp = sparse.csr_matrix(dense[n_a:])
+        X_sp.eliminate_zeros()
+        Y_sp.eliminate_zeros()
+        sp_result = mannwhitneyu_sparse(X_sp, Y_sp)
 
         for i in range(n_genes):
-            x = dense[:n_a, i]
-            y = dense[n_a:, i]
-            expected = mannwhitneyu(x, y)
+            expected = mannwhitneyu(dense[:n_a, i], dense[n_a:, i])
             assert np.isclose(sp_result.statistic[i], expected.statistic), (
                 f"stat mismatch col {i}"
             )
@@ -432,11 +444,12 @@ class TestSparse:
         rng = np.random.default_rng(77)
         n_a, n_b, n_genes = 15, 12, 8
         dense = rng.integers(0, 8, size=(n_a + n_b, n_genes)).astype(np.float64)
-        group_a = np.array([True] * n_a + [False] * n_b)
 
-        sp = sparse.csr_matrix(dense)
-        sp.eliminate_zeros()
-        sp_result = mannwhitneyu_sparse(sp, group_a)
+        X_sp = sparse.csr_matrix(dense[:n_a])
+        Y_sp = sparse.csr_matrix(dense[n_a:])
+        X_sp.eliminate_zeros()
+        Y_sp.eliminate_zeros()
+        sp_result = mannwhitneyu_sparse(X_sp, Y_sp)
 
         for i in range(n_genes):
             expected = _scipy_mwu(dense[:n_a, i], dense[n_a:, i])
@@ -450,19 +463,16 @@ class TestSparse:
     def test_sparse_highly_sparse(self):
         """~95% zeros, realistic for scRNA-seq."""
         rng = np.random.default_rng(99)
-        n_cells, n_genes = 200, 50
-        n_a = 80
-        # ~5% nonzero
-        dense = np.zeros((n_cells, n_genes), dtype=np.float64)
-        mask = rng.random((n_cells, n_genes)) < 0.05
+        n_a, n_b, n_genes = 80, 120, 50
+        dense = np.zeros((n_a + n_b, n_genes), dtype=np.float64)
+        mask = rng.random((n_a + n_b, n_genes)) < 0.05
         dense[mask] = rng.integers(1, 100, size=mask.sum()).astype(np.float64)
 
-        group_a = np.zeros(n_cells, dtype=bool)
-        group_a[:n_a] = True
-
-        sp = sparse.csr_matrix(dense)
-        sp.eliminate_zeros()
-        sp_result = mannwhitneyu_sparse(sp, group_a)
+        X_sp = sparse.csr_matrix(dense[:n_a])
+        Y_sp = sparse.csr_matrix(dense[n_a:])
+        X_sp.eliminate_zeros()
+        Y_sp.eliminate_zeros()
+        sp_result = mannwhitneyu_sparse(X_sp, Y_sp)
 
         for i in range(n_genes):
             expected = _scipy_mwu(dense[:n_a, i], dense[n_a:, i])
@@ -475,31 +485,31 @@ class TestSparse:
 
     def test_sparse_all_zeros_column(self):
         """A column that is entirely zero → p = 1.0."""
-        n_cells, n_genes = 20, 3
-        n_a = 10
-        dense = np.zeros((n_cells, n_genes), dtype=np.float64)
+        n_a, n_b, n_genes = 10, 10, 3
+        dense = np.zeros((n_a + n_b, n_genes), dtype=np.float64)
         # Only put data in columns 0 and 2, leave column 1 all zeros
         dense[:5, 0] = [1, 2, 3, 4, 5]
-        dense[10:15, 2] = [6, 7, 8, 9, 10]
+        dense[n_a : n_a + 5, 2] = [6, 7, 8, 9, 10]
 
-        group_a = np.array([True] * n_a + [False] * n_a)
-        sp = sparse.csr_matrix(dense)
-        sp.eliminate_zeros()
-        result = mannwhitneyu_sparse(sp, group_a)
+        X_sp = sparse.csr_matrix(dense[:n_a])
+        Y_sp = sparse.csr_matrix(dense[n_a:])
+        X_sp.eliminate_zeros()
+        Y_sp.eliminate_zeros()
+        result = mannwhitneyu_sparse(X_sp, Y_sp)
 
         assert result.pvalue[1] == 1.0
 
     def test_sparse_no_zeros_column(self):
         """A column with no zeros (fully dense in sparse matrix)."""
         rng = np.random.default_rng(55)
-        n_cells, n_genes = 20, 3
-        n_a = 10
-        dense = rng.integers(1, 50, size=(n_cells, n_genes)).astype(np.float64)
-        group_a = np.array([True] * n_a + [False] * (n_cells - n_a))
+        n_a, n_b, n_genes = 10, 10, 3
+        dense = rng.integers(1, 50, size=(n_a + n_b, n_genes)).astype(np.float64)
 
-        sp = sparse.csr_matrix(dense)
-        sp.eliminate_zeros()
-        sp_result = mannwhitneyu_sparse(sp, group_a)
+        X_sp = sparse.csr_matrix(dense[:n_a])
+        Y_sp = sparse.csr_matrix(dense[n_a:])
+        X_sp.eliminate_zeros()
+        Y_sp.eliminate_zeros()
+        sp_result = mannwhitneyu_sparse(X_sp, Y_sp)
 
         for i in range(n_genes):
             expected = mannwhitneyu(dense[:n_a, i], dense[n_a:, i])
@@ -511,12 +521,14 @@ class TestSparse:
         rng = np.random.default_rng(33)
         n_a, n_b, n_genes = 15, 12, 6
         dense = rng.integers(0, 10, size=(n_a + n_b, n_genes)).astype(np.float64)
-        group_a = np.array([True] * n_a + [False] * n_b)
-        sp = sparse.csr_matrix(dense)
-        sp.eliminate_zeros()
+
+        X_sp = sparse.csr_matrix(dense[:n_a])
+        Y_sp = sparse.csr_matrix(dense[n_a:])
+        X_sp.eliminate_zeros()
+        Y_sp.eliminate_zeros()
 
         for alt in ("two-sided", "less", "greater"):
-            sp_result = mannwhitneyu_sparse(sp, group_a, alternative=alt)
+            sp_result = mannwhitneyu_sparse(X_sp, Y_sp, alternative=alt)
             for i in range(n_genes):
                 expected = _scipy_mwu(dense[:n_a, i], dense[n_a:, i], alternative=alt)
                 assert np.isclose(sp_result.statistic[i], expected.statistic), (
@@ -531,12 +543,14 @@ class TestSparse:
         rng = np.random.default_rng(44)
         n_a, n_b, n_genes = 12, 10, 4
         dense = rng.integers(0, 8, size=(n_a + n_b, n_genes)).astype(np.float64)
-        group_a = np.array([True] * n_a + [False] * n_b)
-        sp = sparse.csr_matrix(dense)
-        sp.eliminate_zeros()
+
+        X_sp = sparse.csr_matrix(dense[:n_a])
+        Y_sp = sparse.csr_matrix(dense[n_a:])
+        X_sp.eliminate_zeros()
+        Y_sp.eliminate_zeros()
 
         for cont in (True, False):
-            sp_result = mannwhitneyu_sparse(sp, group_a, use_continuity=cont)
+            sp_result = mannwhitneyu_sparse(X_sp, Y_sp, use_continuity=cont)
             for i in range(n_genes):
                 expected = _scipy_mwu(
                     dense[:n_a, i], dense[n_a:, i], use_continuity=cont
@@ -546,7 +560,6 @@ class TestSparse:
 
     def test_sparse_explicit_zeros_handled(self):
         """Explicit stored zeros should be handled by eliminate_zeros()."""
-        n_cells, n_genes = 10, 2
         n_a = 5
         dense = np.array(
             [
@@ -563,53 +576,46 @@ class TestSparse:
             ],
             dtype=np.float64,
         )
-        group_a = np.array([True] * n_a + [False] * (n_cells - n_a))
 
-        sp = sparse.csr_matrix(dense)
-        # Don't call eliminate_zeros — the CSR may store explicit zeros
-        # The wrapper requires the user to call eliminate_zeros beforehand,
-        # but for this test we verify it still works on clean data
-        sp.eliminate_zeros()
-        sp_result = mannwhitneyu_sparse(sp, group_a)
+        X_sp = sparse.csr_matrix(dense[:n_a])
+        Y_sp = sparse.csr_matrix(dense[n_a:])
+        X_sp.eliminate_zeros()
+        Y_sp.eliminate_zeros()
+        sp_result = mannwhitneyu_sparse(X_sp, Y_sp)
 
-        for i in range(n_genes):
+        for i in range(dense.shape[1]):
             expected = mannwhitneyu(dense[:n_a, i], dense[n_a:, i])
             assert np.isclose(sp_result.statistic[i], expected.statistic)
             assert np.isclose(sp_result.pvalue[i], expected.pvalue)
 
     def test_sparse_negative_values_rejected(self):
         """Negative stored values should raise ValueError."""
-        dense = np.array([[1, -1], [2, 3]], dtype=np.float64)
-        sp = sparse.csr_matrix(dense)
-        group_a = np.array([True, False])
+        X_sp = sparse.csr_matrix(np.array([[1, 2]], dtype=np.float64))
+        Y_sp = sparse.csr_matrix(np.array([[2, -1]], dtype=np.float64))
         with pytest.raises(ValueError, match="non-negative"):
-            mannwhitneyu_sparse(sp, group_a)
+            mannwhitneyu_sparse(X_sp, Y_sp)
 
     def test_sparse_non_csr_rejected(self):
         """Non-CSR format should raise TypeError."""
-        dense = np.array([[1, 2], [3, 4]], dtype=np.float64)
-        sp_csc = sparse.csc_matrix(dense)
-        group_a = np.array([True, False])
+        X_sp = sparse.csr_matrix(np.array([[1, 2]], dtype=np.float64))
+        Y_csc = sparse.csc_matrix(np.array([[3, 4]], dtype=np.float64))
         with pytest.raises(TypeError, match="CSR"):
-            mannwhitneyu_sparse(sp_csc, group_a)
+            mannwhitneyu_sparse(X_sp, Y_csc)
 
     def test_sparse_large(self):
         """Larger matrix (5000 cells, 200 genes, ~90% sparse)."""
         rng = np.random.default_rng(123)
-        n_cells, n_genes = 5000, 200
-        n_a = 2000
+        n_a, n_b, n_genes = 2000, 3000, 200
 
-        # ~10% nonzero
-        dense = np.zeros((n_cells, n_genes), dtype=np.float64)
-        mask = rng.random((n_cells, n_genes)) < 0.10
+        dense = np.zeros((n_a + n_b, n_genes), dtype=np.float64)
+        mask = rng.random((n_a + n_b, n_genes)) < 0.10
         dense[mask] = rng.integers(1, 500, size=mask.sum()).astype(np.float64)
 
-        group_a = np.zeros(n_cells, dtype=bool)
-        group_a[:n_a] = True
-
-        sp = sparse.csr_matrix(dense)
-        sp.eliminate_zeros()
-        sp_result = mannwhitneyu_sparse(sp, group_a)
+        X_sp = sparse.csr_matrix(dense[:n_a])
+        Y_sp = sparse.csr_matrix(dense[n_a:])
+        X_sp.eliminate_zeros()
+        Y_sp.eliminate_zeros()
+        sp_result = mannwhitneyu_sparse(X_sp, Y_sp)
 
         # Spot-check 20 random columns against scipy
         check_cols = rng.choice(n_genes, size=20, replace=False)
@@ -623,7 +629,7 @@ class TestSparse:
             )
 
     def test_sparse_shuffled_groups(self):
-        """Group membership is not contiguous (interleaved A/B cells)."""
+        """Slicing by shuffled group labels (the primary use case)."""
         rng = np.random.default_rng(66)
         n_cells, n_genes = 40, 5
         dense = rng.integers(0, 10, size=(n_cells, n_genes)).astype(np.float64)
@@ -631,13 +637,14 @@ class TestSparse:
         group_a = np.zeros(n_cells, dtype=bool)
         group_a[rng.choice(n_cells, size=20, replace=False)] = True
 
-        sp = sparse.csr_matrix(dense)
-        sp.eliminate_zeros()
-        sp_result = mannwhitneyu_sparse(sp, group_a)
+        # This is the realistic workflow: slice by labels into two CSR matrices
+        X_sp = sparse.csr_matrix(dense[group_a])
+        Y_sp = sparse.csr_matrix(dense[~group_a])
+        X_sp.eliminate_zeros()
+        Y_sp.eliminate_zeros()
+        sp_result = mannwhitneyu_sparse(X_sp, Y_sp)
 
         for i in range(n_genes):
-            x = dense[group_a, i]
-            y = dense[~group_a, i]
-            expected = _scipy_mwu(x, y)
+            expected = _scipy_mwu(dense[group_a, i], dense[~group_a, i])
             assert np.isclose(sp_result.statistic[i], expected.statistic), f"col {i}"
             assert np.isclose(sp_result.pvalue[i], expected.pvalue), f"col {i}"

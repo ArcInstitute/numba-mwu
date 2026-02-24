@@ -3,7 +3,7 @@
 Works directly with CSR format (the standard for single-cell data) by
 building a lightweight column index — a permutation array and column
 pointers — without copying the data values. Memory overhead is one int
-array of length nnz plus one int array of length (n_cols + 1).
+array of length nnz plus one int array of length (n_cols + 1) per matrix.
 """
 
 import math
@@ -24,7 +24,7 @@ def _build_col_index(csr_indptr, csr_indices, n_cols):
         col_indptr[j] .. col_indptr[j+1] gives the range of entries for
         column j in the col_order array.
     col_order : int64 array (nnz)
-        Indices into the CSR data/indices arrays, grouped by column.
+        Indices into the CSR data arrays, grouped by column.
         data[col_order[col_indptr[j]:col_indptr[j+1]]] gives the nonzero
         values for column j.
     """
@@ -58,26 +58,20 @@ def _build_col_index(csr_indptr, csr_indices, n_cols):
 
 
 @nb.njit
-def _sparse_mwu_column(
-    data, row_indices, order, n_a, n_b, group_a, use_continuity, alternative
-):
-    """Compute Mann-Whitney U for a single gene from CSR data via indirection.
+def _sparse_mwu_column(vals_a, vals_b, n_a, n_b, use_continuity, alternative):
+    """Compute Mann-Whitney U for a single gene from two groups' nonzero values.
 
     Zeros are treated analytically — they form a contiguous block at the
     start of the sorted order (requires non-negative data).
 
     Parameters
     ----------
-    data : float64 1-D array
-        Full CSR data array (shared, read-only).
-    row_indices : int 1-D array
-        Full CSR row-index array built from indptr (shared, read-only).
-    order : int64 1-D array
-        Indices into data/row_indices for this column's nonzero entries.
+    vals_a : float64 1-D array
+        Nonzero values for this gene in group A.
+    vals_b : float64 1-D array
+        Nonzero values for this gene in group B.
     n_a, n_b : int
-        Number of cells in group A and group B.
-    group_a : bool 1-D array (length n_cells)
-        True for cells in group A.
+        Total number of cells in group A and group B (including zeros).
     use_continuity : bool
     alternative : int (0=two-sided, 1=less, 2=greater)
 
@@ -87,30 +81,28 @@ def _sparse_mwu_column(
     pvalue : float64
     """
     n = n_a + n_b
-    nnz = order.shape[0]
-    nz = n - nnz  # implicit zeros
+    nnz_a = vals_a.shape[0]
+    nnz_b = vals_b.shape[0]
+    nnz = nnz_a + nnz_b
+    nz = n - nnz  # total implicit zeros
+    nz_a = n_a - nnz_a  # zeros in group A
 
     # --- All zeros: no evidence of difference ---
     if nnz == 0:
         return n_a * n_b / 2.0, 1.0
 
-    # --- Gather this column's values into a contiguous work array ---
-    col_vals = np.empty(nnz, dtype=np.float64)
-    col_rows = np.empty(nnz, dtype=np.int64)
-    for k in range(nnz):
-        idx = order[k]
-        col_vals[k] = data[idx]
-        col_rows[k] = row_indices[idx]
-
-    # --- Count nonzeros per group ---
-    nnz_a = 0
-    for k in range(nnz):
-        if group_a[col_rows[k]]:
-            nnz_a += 1
-    nz_a = n_a - nnz_a
+    # --- Merge nonzero values into a single array with group tags ---
+    all_vals = np.empty(nnz, dtype=np.float64)
+    is_a = np.empty(nnz, dtype=np.int8)
+    for k in range(nnz_a):
+        all_vals[k] = vals_a[k]
+        is_a[k] = 1
+    for k in range(nnz_b):
+        all_vals[nnz_a + k] = vals_b[k]
+        is_a[nnz_a + k] = 0
 
     # --- Sort nonzero values ---
-    sort_idx = np.argsort(col_vals)
+    sort_idx = np.argsort(all_vals)
 
     # --- Walk sorted nonzeros: compute local ranks, tie correction,
     #     and sum of global ranks for group A nonzeros ---
@@ -120,7 +112,7 @@ def _sparse_mwu_column(
     i = 0
     while i < nnz:
         j = i
-        while j < nnz - 1 and col_vals[sort_idx[j]] == col_vals[sort_idx[j + 1]]:
+        while j < nnz - 1 and all_vals[sort_idx[j]] == all_vals[sort_idx[j + 1]]:
             j += 1
 
         tie_count = float(j - i + 1)
@@ -131,7 +123,7 @@ def _sparse_mwu_column(
         global_avg_rank = nz + local_avg_rank
 
         for k in range(i, j + 1):
-            if group_a[col_rows[sort_idx[k]]]:
+            if is_a[sort_idx[k]] == 1:
                 sum_global_ranks_a += global_avg_rank
 
         i = j + 1
@@ -183,33 +175,41 @@ def _sparse_mwu_column(
     return U1, p
 
 
+@nb.njit
+def _gather_col_vals(csr_data, col_order, start, end):
+    """Gather nonzero values for a single column from CSR data via col_order."""
+    n = end - start
+    vals = np.empty(n, dtype=np.float64)
+    for k in range(n):
+        vals[k] = csr_data[col_order[start + k]]
+    return vals
+
+
 @nb.njit(parallel=True)
 def _sparse_mwu_batch(
-    csr_data,
-    row_indices,
-    col_indptr,
-    col_order,
-    n_cells,
-    group_a,
+    data_a,
+    col_indptr_a,
+    col_order_a,
     n_a,
+    data_b,
+    col_indptr_b,
+    col_order_b,
+    n_b,
     use_continuity,
     alternative,
 ):
-    """Run sparse MWU test on each gene using CSR data + column index.
+    """Run sparse MWU test on each gene using two CSR matrices' column indices.
 
     Parameters
     ----------
-    csr_data : float64 1-D array
-        CSR data array (not copied).
-    row_indices : int64 1-D array
-        Row index for each entry in csr_data (precomputed from CSR indptr).
-    col_indptr : int64 1-D array (n_genes + 1)
-        Column pointers into col_order.
-    col_order : int64 1-D array (nnz)
-        Permutation mapping column-grouped positions to CSR data indices.
-    n_cells : int
-    group_a : bool 1-D array (n_cells)
-    n_a : int
+    data_a : float64 1-D array — CSR data for group A
+    col_indptr_a : int64 1-D array (n_genes + 1) — column pointers for A
+    col_order_a : int64 1-D array (nnz_a) — column permutation for A
+    n_a : int — total rows in A
+    data_b : float64 1-D array — CSR data for group B
+    col_indptr_b : int64 1-D array (n_genes + 1) — column pointers for B
+    col_order_b : int64 1-D array (nnz_b) — column permutation for B
+    n_b : int — total rows in B
     use_continuity : bool
     alternative : int
 
@@ -218,33 +218,19 @@ def _sparse_mwu_batch(
     U_out : float64 array (n_genes,)
     p_out : float64 array (n_genes,)
     """
-    n_genes = col_indptr.shape[0] - 1
-    n_b = n_cells - n_a
+    n_genes = col_indptr_a.shape[0] - 1
     U_out = np.empty(n_genes, dtype=np.float64)
     p_out = np.empty(n_genes, dtype=np.float64)
 
     for j in nb.prange(n_genes):  # type: ignore
-        start = col_indptr[j]
-        end = col_indptr[j + 1]
-        order = col_order[start:end]
+        vals_a = _gather_col_vals(
+            data_a, col_order_a, col_indptr_a[j], col_indptr_a[j + 1]
+        )
+        vals_b = _gather_col_vals(
+            data_b, col_order_b, col_indptr_b[j], col_indptr_b[j + 1]
+        )
         U_out[j], p_out[j] = _sparse_mwu_column(
-            csr_data, row_indices, order, n_a, n_b, group_a, use_continuity, alternative
+            vals_a, vals_b, n_a, n_b, use_continuity, alternative
         )
 
     return U_out, p_out
-
-
-@nb.njit
-def _expand_row_indices(indptr):
-    """Expand CSR indptr into a flat row-index array.
-
-    For each nonzero entry k, row_indices[k] = the row it belongs to.
-    This is the inverse of indptr and avoids repeated binary search.
-    """
-    nnz = indptr[-1]
-    n_rows = indptr.shape[0] - 1
-    row_indices = np.empty(nnz, dtype=np.int64)
-    for i in range(n_rows):
-        for k in range(indptr[i], indptr[i + 1]):
-            row_indices[k] = i
-    return row_indices

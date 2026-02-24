@@ -23,26 +23,22 @@ from numba_mwu import mannwhitneyu_columns, mannwhitneyu_sparse
 
 
 def _make_dense_int(rng, n_cells, n_genes, n_a):
-    """Non-negative integer data (raw counts)."""
+    """Non-negative integer data (raw counts). Returns (X, Y) matrices."""
     data = rng.integers(0, 50, size=(n_cells, n_genes)).astype(np.float64)
-    group_a = np.zeros(n_cells, dtype=bool)
-    group_a[:n_a] = True
-    return data, group_a
+    return data[:n_a], data[n_a:]
 
 
 def _make_dense_float(rng, n_cells, n_genes, n_a):
-    """Non-negative float data (normalized expression)."""
+    """Non-negative float data (normalized expression). Returns (X, Y) matrices."""
     data = rng.exponential(2.0, size=(n_cells, n_genes))
     # Zero out ~70% to mimic real expression
     mask = rng.random((n_cells, n_genes)) < 0.7
     data[mask] = 0.0
-    group_a = np.zeros(n_cells, dtype=bool)
-    group_a[:n_a] = True
-    return data, group_a
+    return data[:n_a], data[n_a:]
 
 
 def _make_sparse(rng, n_cells, n_genes, n_a, sparsity, dtype_kind):
-    """Sparse CSR matrix with given sparsity level."""
+    """Sparse CSR matrices with given sparsity level. Returns (X_sp, Y_sp, X_dense, Y_dense)."""
     density = 1.0 - sparsity
     data = np.zeros((n_cells, n_genes), dtype=np.float64)
     mask = rng.random((n_cells, n_genes)) < density
@@ -50,11 +46,11 @@ def _make_sparse(rng, n_cells, n_genes, n_a, sparsity, dtype_kind):
         data[mask] = rng.integers(1, 100, size=mask.sum()).astype(np.float64)
     else:
         data[mask] = rng.exponential(5.0, size=mask.sum())
-    sp = sparse.csr_matrix(data)
-    sp.eliminate_zeros()
-    group_a = np.zeros(n_cells, dtype=bool)
-    group_a[:n_a] = True
-    return sp, data, group_a
+    X_sp = sparse.csr_matrix(data[:n_a])
+    Y_sp = sparse.csr_matrix(data[n_a:])
+    X_sp.eliminate_zeros()
+    Y_sp.eliminate_zeros()
+    return X_sp, Y_sp, data[:n_a], data[n_a:]
 
 
 def _time_fn(fn, *args, n_repeats=3, warmup=1):
@@ -69,18 +65,18 @@ def _time_fn(fn, *args, n_repeats=3, warmup=1):
     return np.median(times)
 
 
-def _scipy_columnwise(data, n_a, n_genes):
+def _scipy_columnwise(X, Y, n_genes):
     """Run scipy mannwhitneyu on each column (the serial baseline)."""
     for j in range(n_genes):
-        stats.mannwhitneyu(data[:n_a, j], data[n_a:, j], method="asymptotic")
+        stats.mannwhitneyu(X[:, j], Y[:, j], method="asymptotic")
 
 
-def _scipy_columnwise_sparse(sp_data, group_a, n_genes):
+def _scipy_columnwise_sparse(X_sp, Y_sp, n_genes):
     """Run scipy mannwhitneyu on each column of dense-from-sparse."""
-    dense = sp_data.toarray()
-    a = group_a
+    X_dense = X_sp.toarray()
+    Y_dense = Y_sp.toarray()
     for j in range(n_genes):
-        stats.mannwhitneyu(dense[a, j], dense[~a, j], method="asymptotic")
+        stats.mannwhitneyu(X_dense[:, j], Y_dense[:, j], method="asymptotic")
 
 
 # ---------------------------------------------------------------------------
@@ -135,12 +131,10 @@ def run_dense_benchmarks():
         print("-" * 65)
 
         for label, n_cells, n_genes, n_a in DENSE_SCENARIOS:
-            data, group_a = make_fn(rng, n_cells, n_genes, n_a)
+            X, Y = make_fn(rng, n_cells, n_genes, n_a)
 
-            t_scipy = _time_fn(
-                _scipy_columnwise, data, n_a, n_genes, n_repeats=3, warmup=0
-            )
-            t_numba = _time_fn(mannwhitneyu_columns, data, n_a, n_repeats=3)
+            t_scipy = _time_fn(_scipy_columnwise, X, Y, n_genes, n_repeats=3, warmup=0)
+            t_numba = _time_fn(mannwhitneyu_columns, X, Y, n_repeats=3)
 
             print(
                 f"{label:<28} {_fmt_time(t_scipy):>12} {_fmt_time(t_numba):>12} "
@@ -167,15 +161,17 @@ def run_sparse_benchmarks():
         print("-" * 85)
 
         for label, n_cells, n_genes, n_a, sparsity in SPARSE_SCENARIOS:
-            sp, dense, group_a = _make_sparse(
+            X_sp, Y_sp, X_dense, Y_dense = _make_sparse(
                 rng, n_cells, n_genes, n_a, sparsity, dtype_label
             )
 
             t_scipy = _time_fn(
-                _scipy_columnwise_sparse, sp, group_a, n_genes, n_repeats=3, warmup=0
+                _scipy_columnwise_sparse, X_sp, Y_sp, n_genes, n_repeats=3, warmup=0
             )
-            t_numba_sparse = _time_fn(mannwhitneyu_sparse, sp, group_a, n_repeats=3)
-            t_numba_dense = _time_fn(mannwhitneyu_columns, dense, n_a, n_repeats=3)
+            t_numba_sparse = _time_fn(mannwhitneyu_sparse, X_sp, Y_sp, n_repeats=3)
+            t_numba_dense = _time_fn(
+                mannwhitneyu_columns, X_dense, Y_dense, n_repeats=3
+            )
 
             print(
                 f"{label:<28} {_fmt_time(t_scipy):>14} {_fmt_time(t_numba_sparse):>14} "
@@ -247,12 +243,13 @@ if __name__ == "__main__":
     mannwhitneyu(_x, _y)
 
     _dense = _rng.integers(0, 5, size=(20, 3)).astype(np.float64)
-    mannwhitneyu_columns(_dense, 10)
+    mannwhitneyu_columns(_dense[:10], _dense[10:])
 
-    _sp = sparse.csr_matrix(_dense)
-    _sp.eliminate_zeros()
-    _ga = np.array([True] * 10 + [False] * 10)
-    mannwhitneyu_sparse(_sp, _ga)
+    _sp_x = sparse.csr_matrix(_dense[:10])
+    _sp_y = sparse.csr_matrix(_dense[10:])
+    _sp_x.eliminate_zeros()
+    _sp_y.eliminate_zeros()
+    mannwhitneyu_sparse(_sp_x, _sp_y)
 
     print("JIT warmup complete.")
     print()
