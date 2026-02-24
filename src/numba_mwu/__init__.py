@@ -4,14 +4,14 @@ from collections import namedtuple
 
 import numpy as np
 
-from ._batch import _mannwhitneyu_batch, _mannwhitneyu_columns
+from ._batch import _mannwhitneyu_columns, _mannwhitneyu_rows
 from ._core import GREATER, LESS, TWO_SIDED, _mannwhitneyu_single
 from ._sparse import _build_col_index, _sparse_mwu_batch
 
 __all__ = [
     "MannWhitneyUResult",
     "mannwhitneyu",
-    "mannwhitneyu_batch",
+    "mannwhitneyu_rows",
     "mannwhitneyu_columns",
     "mannwhitneyu_sparse",
 ]
@@ -72,7 +72,7 @@ def mannwhitneyu(x, y, use_continuity=True, alternative="two-sided"):
     return MannWhitneyUResult(stat, pval)
 
 
-def mannwhitneyu_batch(X, y, use_continuity=True, alternative="two-sided"):
+def mannwhitneyu_rows(X, y, use_continuity=True, alternative="two-sided"):
     """Run Mann-Whitney U test for each row of X against y (parallelized).
 
     Parameters
@@ -100,7 +100,7 @@ def mannwhitneyu_batch(X, y, use_continuity=True, alternative="two-sided"):
         raise ValueError("`X` must not contain NaNs.")
     y = _validate_1d(y, "y")
     alt = _validate_alternative(alternative)
-    stats, pvals = _mannwhitneyu_batch(X, y, use_continuity, alt)
+    stats, pvals = _mannwhitneyu_rows(X, y, use_continuity, alt)
     return MannWhitneyUResult(stats, pvals)
 
 

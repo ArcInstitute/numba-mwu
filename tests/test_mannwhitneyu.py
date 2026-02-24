@@ -6,8 +6,8 @@ from scipy import sparse, stats
 
 from numba_mwu import (
     mannwhitneyu,
-    mannwhitneyu_batch,
     mannwhitneyu_columns,
+    mannwhitneyu_rows,
     mannwhitneyu_sparse,
 )
 
@@ -299,54 +299,54 @@ class TestInputValidation:
 
 
 # ---------------------------------------------------------------------------
-# Batch functions
+# Row and column batch functions
 # ---------------------------------------------------------------------------
 
 
-class TestBatch:
-    def test_batch_matches_single(self):
-        """mannwhitneyu_batch should match row-by-row single calls."""
+class TestRows:
+    def test_rows_matches_single(self):
+        """mannwhitneyu_rows should match row-by-row single calls."""
         rng = np.random.default_rng(42)
         n_tests = 50
         n1, n2 = 30, 25
         X = rng.standard_normal((n_tests, n1))
         y = rng.standard_normal(n2)
 
-        batch_result = mannwhitneyu_batch(X, y)
+        row_result = mannwhitneyu_rows(X, y)
 
         for i in range(n_tests):
             single = mannwhitneyu(X[i], y)
-            assert np.isclose(batch_result.statistic[i], single.statistic), (
+            assert np.isclose(row_result.statistic[i], single.statistic), (
                 f"stat mismatch at {i}"
             )
-            assert np.isclose(batch_result.pvalue[i], single.pvalue), (
+            assert np.isclose(row_result.pvalue[i], single.pvalue), (
                 f"pvalue mismatch at {i}"
             )
 
-    def test_batch_matches_scipy(self):
-        """mannwhitneyu_batch results should match scipy."""
+    def test_rows_matches_scipy(self):
+        """mannwhitneyu_rows results should match scipy."""
         rng = np.random.default_rng(77)
         n_tests = 20
         X = rng.standard_normal((n_tests, 15))
         y = rng.standard_normal(10) + 0.5
 
-        batch_result = mannwhitneyu_batch(X, y)
+        row_result = mannwhitneyu_rows(X, y)
 
         for i in range(n_tests):
             expected = _scipy_mwu(X[i], y)
-            assert np.isclose(batch_result.statistic[i], expected.statistic)
-            assert np.isclose(batch_result.pvalue[i], expected.pvalue)
+            assert np.isclose(row_result.statistic[i], expected.statistic)
+            assert np.isclose(row_result.pvalue[i], expected.pvalue)
 
-    def test_batch_alternatives(self):
+    def test_rows_alternatives(self):
         rng = np.random.default_rng(33)
         X = rng.standard_normal((10, 20))
         y = rng.standard_normal(15)
         for alt in ("two-sided", "less", "greater"):
-            batch = mannwhitneyu_batch(X, y, alternative=alt)
+            rows = mannwhitneyu_rows(X, y, alternative=alt)
             for i in range(X.shape[0]):
                 single = mannwhitneyu(X[i], y, alternative=alt)
-                assert np.isclose(batch.statistic[i], single.statistic)
-                assert np.isclose(batch.pvalue[i], single.pvalue)
+                assert np.isclose(rows.statistic[i], single.statistic)
+                assert np.isclose(rows.pvalue[i], single.pvalue)
 
 
 class TestColumns:

@@ -7,7 +7,7 @@ from ._core import _mannwhitneyu_single
 
 
 @nb.njit(parallel=True)
-def _mannwhitneyu_batch(X, y, use_continuity, alternative):
+def _mannwhitneyu_rows(X, y, use_continuity, alternative):
     """Run Mann-Whitney U test for each row of X against y.
 
     Parameters
