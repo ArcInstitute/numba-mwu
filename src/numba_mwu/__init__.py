@@ -10,13 +10,18 @@ from ._sparse import _build_col_index, _sparse_mwu_batch
 
 __all__ = [
     "MannWhitneyUResult",
+    "SparseColumnIndex",
     "mannwhitneyu",
     "mannwhitneyu_rows",
     "mannwhitneyu_columns",
     "mannwhitneyu_sparse",
+    "sparse_column_index",
 ]
 
 MannWhitneyUResult = namedtuple("MannWhitneyUResult", ("statistic", "pvalue"))
+SparseColumnIndex = namedtuple(
+    "SparseColumnIndex", ("data", "col_indptr", "col_order", "n_rows", "n_cols")
+)
 
 _ALTERNATIVE_MAP = {
     "two-sided": TWO_SIDED,
@@ -167,6 +172,47 @@ def _validate_csr(X, name):
     return X
 
 
+def sparse_column_index(X):
+    """Precompute a column index for a CSR sparse matrix.
+
+    The returned ``SparseColumnIndex`` can be passed to
+    ``mannwhitneyu_sparse`` in place of a raw CSR matrix, avoiding
+    redundant index construction when the same matrix is reused
+    across many comparisons::
+
+        ref_idx = sparse_column_index(ref_matrix)
+        for label in labels:
+            result = mannwhitneyu_sparse(group_matrix, ref_idx)
+
+    Parameters
+    ----------
+    X : scipy.sparse.csr_matrix or csr_array
+        Sparse matrix in CSR format with non-negative values.
+        Call ``X.eliminate_zeros()`` beforehand if it may contain
+        explicitly stored zeros.
+
+    Returns
+    -------
+    SparseColumnIndex
+        Precomputed index that can be passed to ``mannwhitneyu_sparse``.
+    """
+    X = _validate_csr(X, "X")
+    if X.shape[0] == 0:
+        raise ValueError("`X` must have at least one row.")
+    data = np.ascontiguousarray(X.data, dtype=np.float64)
+    indptr = np.ascontiguousarray(X.indptr)
+    indices = np.ascontiguousarray(X.indices)
+    col_indptr, col_order = _build_col_index(indptr, indices, X.shape[1])
+    return SparseColumnIndex(data, col_indptr, col_order, X.shape[0], X.shape[1])
+
+
+def _resolve_sparse(arg, name):
+    """Convert a CSR matrix or SparseColumnIndex to a SparseColumnIndex."""
+    if isinstance(arg, SparseColumnIndex):
+        return arg
+    return sparse_column_index(arg)
+
+
 def mannwhitneyu_sparse(X, Y, use_continuity=True, alternative="two-sided"):
     """Run Mann-Whitney U test for each gene (column) of two sparse matrices.
 
@@ -185,15 +231,19 @@ def mannwhitneyu_sparse(X, Y, use_continuity=True, alternative="two-sided"):
     form a contiguous block at the start of the sorted order. This holds
     for raw counts, normalized expression, and any non-negative transformation.
 
+    Both ``X`` and ``Y`` can be either a CSR matrix or a precomputed
+    ``SparseColumnIndex`` (from ``sparse_column_index``). Precomputing
+    is useful when the same matrix is compared against many others.
+
     Parameters
     ----------
-    X : scipy.sparse.csr_matrix or csr_array, shape (n1, n_genes)
-        Sparse expression matrix for group A in CSR format. Must have
+    X : csr_matrix, csr_array, or SparseColumnIndex, shape (n1, n_genes)
+        Sparse expression matrix for group A. If a CSR matrix, must have
         non-negative values. Call ``X.eliminate_zeros()`` beforehand if
         the matrix may contain explicitly stored zeros.
-    Y : scipy.sparse.csr_matrix or csr_array, shape (n2, n_genes)
-        Sparse expression matrix for group B in CSR format. Must have
-        the same number of columns as X.
+    Y : csr_matrix, csr_array, or SparseColumnIndex, shape (n2, n_genes)
+        Sparse expression matrix for group B. Must have the same number
+        of columns as X.
     use_continuity : bool, optional
         Whether to apply continuity correction. Default True.
     alternative : {'two-sided', 'less', 'greater'}, optional
@@ -205,44 +255,26 @@ def mannwhitneyu_sparse(X, Y, use_continuity=True, alternative="two-sided"):
         Named tuple with ``statistic`` and ``pvalue`` arrays of shape
         (n_genes,).
     """
-    X = _validate_csr(X, "X")
-    Y = _validate_csr(Y, "Y")
+    idx_a = _resolve_sparse(X, "X")
+    idx_b = _resolve_sparse(Y, "Y")
 
-    if X.shape[1] != Y.shape[1]:
+    if idx_a.n_cols != idx_b.n_cols:
         raise ValueError(
             f"`X` and `Y` must have the same number of columns, "
-            f"got {X.shape[1]} and {Y.shape[1]}."
+            f"got {idx_a.n_cols} and {idx_b.n_cols}."
         )
-    if X.shape[0] == 0:
-        raise ValueError("`X` must have at least one row.")
-    if Y.shape[0] == 0:
-        raise ValueError("`Y` must have at least one row.")
 
     alt = _validate_alternative(alternative)
-    n_genes = X.shape[1]
-    n_a = X.shape[0]
-    n_b = Y.shape[0]
-
-    # Build column indices for each matrix — no data copy
-    data_a = np.ascontiguousarray(X.data, dtype=np.float64)
-    indptr_a = np.ascontiguousarray(X.indptr)
-    indices_a = np.ascontiguousarray(X.indices)
-    col_indptr_a, col_order_a = _build_col_index(indptr_a, indices_a, n_genes)
-
-    data_b = np.ascontiguousarray(Y.data, dtype=np.float64)
-    indptr_b = np.ascontiguousarray(Y.indptr)
-    indices_b = np.ascontiguousarray(Y.indices)
-    col_indptr_b, col_order_b = _build_col_index(indptr_b, indices_b, n_genes)
 
     stats, pvals = _sparse_mwu_batch(
-        data_a,
-        col_indptr_a,
-        col_order_a,
-        n_a,
-        data_b,
-        col_indptr_b,
-        col_order_b,
-        n_b,
+        idx_a.data,
+        idx_a.col_indptr,
+        idx_a.col_order,
+        idx_a.n_rows,
+        idx_b.data,
+        idx_b.col_indptr,
+        idx_b.col_order,
+        idx_b.n_rows,
         use_continuity,
         alt,
     )
