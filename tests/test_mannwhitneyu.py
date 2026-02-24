@@ -9,6 +9,7 @@ from numba_mwu import (
     mannwhitneyu_columns,
     mannwhitneyu_rows,
     mannwhitneyu_sparse,
+    sparse_column_index,
 )
 
 # ---------------------------------------------------------------------------
@@ -648,3 +649,97 @@ class TestSparse:
             expected = _scipy_mwu(dense[group_a, i], dense[~group_a, i])
             assert np.isclose(sp_result.statistic[i], expected.statistic), f"col {i}"
             assert np.isclose(sp_result.pvalue[i], expected.pvalue), f"col {i}"
+
+
+# ---------------------------------------------------------------------------
+# Precomputed sparse column index
+# ---------------------------------------------------------------------------
+
+
+class TestSparseColumnIndex:
+    """Validate that precomputed SparseColumnIndex produces identical results."""
+
+    def test_precomputed_matches_raw(self):
+        """Precomputed index should give identical results to raw CSR."""
+        rng = np.random.default_rng(42)
+        n_a, n_b, n_genes = 15, 12, 8
+        dense = rng.integers(0, 10, size=(n_a + n_b, n_genes)).astype(np.float64)
+
+        X_sp = sparse.csr_matrix(dense[:n_a])
+        Y_sp = sparse.csr_matrix(dense[n_a:])
+        X_sp.eliminate_zeros()
+        Y_sp.eliminate_zeros()
+
+        raw = mannwhitneyu_sparse(X_sp, Y_sp)
+
+        X_idx = sparse_column_index(X_sp)
+        Y_idx = sparse_column_index(Y_sp)
+        pre = mannwhitneyu_sparse(X_idx, Y_idx)
+
+        np.testing.assert_array_equal(raw.statistic, pre.statistic)
+        np.testing.assert_array_equal(raw.pvalue, pre.pvalue)
+
+    def test_precomputed_reuse_reference(self):
+        """Reusing a precomputed reference across multiple comparisons."""
+        rng = np.random.default_rng(77)
+        n_ref, n_genes = 50, 10
+        ref_dense = rng.integers(0, 8, size=(n_ref, n_genes)).astype(np.float64)
+        ref_sp = sparse.csr_matrix(ref_dense)
+        ref_sp.eliminate_zeros()
+        ref_idx = sparse_column_index(ref_sp)
+
+        for _ in range(5):
+            n_test = rng.integers(10, 30)
+            test_dense = rng.integers(0, 8, size=(n_test, n_genes)).astype(np.float64)
+            test_sp = sparse.csr_matrix(test_dense)
+            test_sp.eliminate_zeros()
+
+            raw = mannwhitneyu_sparse(test_sp, ref_sp)
+            pre = mannwhitneyu_sparse(test_sp, ref_idx)
+
+            np.testing.assert_array_equal(raw.statistic, pre.statistic)
+            np.testing.assert_array_equal(raw.pvalue, pre.pvalue)
+
+    def test_mixed_precomputed_and_raw(self):
+        """One argument precomputed, the other raw CSR."""
+        rng = np.random.default_rng(33)
+        n_a, n_b, n_genes = 20, 15, 6
+        dense = rng.integers(0, 10, size=(n_a + n_b, n_genes)).astype(np.float64)
+
+        X_sp = sparse.csr_matrix(dense[:n_a])
+        Y_sp = sparse.csr_matrix(dense[n_a:])
+        X_sp.eliminate_zeros()
+        Y_sp.eliminate_zeros()
+
+        raw = mannwhitneyu_sparse(X_sp, Y_sp)
+
+        # Precomputed X, raw Y
+        X_idx = sparse_column_index(X_sp)
+        mixed1 = mannwhitneyu_sparse(X_idx, Y_sp)
+        np.testing.assert_array_equal(raw.statistic, mixed1.statistic)
+        np.testing.assert_array_equal(raw.pvalue, mixed1.pvalue)
+
+        # Raw X, precomputed Y
+        Y_idx = sparse_column_index(Y_sp)
+        mixed2 = mannwhitneyu_sparse(X_sp, Y_idx)
+        np.testing.assert_array_equal(raw.statistic, mixed2.statistic)
+        np.testing.assert_array_equal(raw.pvalue, mixed2.pvalue)
+
+    def test_precomputed_alternatives(self):
+        """All alternatives work with precomputed index."""
+        rng = np.random.default_rng(44)
+        n_a, n_b, n_genes = 12, 10, 5
+        dense = rng.integers(0, 8, size=(n_a + n_b, n_genes)).astype(np.float64)
+
+        X_sp = sparse.csr_matrix(dense[:n_a])
+        Y_sp = sparse.csr_matrix(dense[n_a:])
+        X_sp.eliminate_zeros()
+        Y_sp.eliminate_zeros()
+
+        Y_idx = sparse_column_index(Y_sp)
+
+        for alt in ("two-sided", "less", "greater"):
+            raw = mannwhitneyu_sparse(X_sp, Y_sp, alternative=alt)
+            pre = mannwhitneyu_sparse(X_sp, Y_idx, alternative=alt)
+            np.testing.assert_array_equal(raw.statistic, pre.statistic)
+            np.testing.assert_array_equal(raw.pvalue, pre.pvalue)
