@@ -11,6 +11,7 @@ import math
 import numba as nb
 import numpy as np
 
+from ._batch import _mwu_stats_one_vs_rest
 from ._core import GREATER, LESS, _ndtr
 
 
@@ -55,6 +56,38 @@ def _build_col_index(csr_indptr, csr_indices, n_cols):
             pos[c] += 1
 
     return col_indptr, col_order
+
+
+@nb.njit
+def _build_col_index_with_rows(csr_indptr, csr_indices, n_cols):
+    """Like ``_build_col_index``, but also returns each entry's originating row.
+
+    The pairwise sparse kernels never need to know which row a nonzero value
+    came from (group membership is already fixed by which of the two input
+    matrices it appears in). The one-vs-rest kernel merges every group into a
+    single matrix, so it needs each nonzero's row to look up its group id.
+
+    Returns
+    -------
+    col_indptr, col_order : see ``_build_col_index``
+    row_of_nnz : int64 array (nnz)
+        ``row_of_nnz[m]`` is the original CSR row of the entry at
+        ``col_order[m]``.
+    """
+    col_indptr, col_order = _build_col_index(csr_indptr, csr_indices, n_cols)
+
+    nnz = csr_indices.shape[0]
+    n_rows = csr_indptr.shape[0] - 1
+    row_of_pos = np.empty(nnz, dtype=np.int64)
+    for i in range(n_rows):
+        for k in range(csr_indptr[i], csr_indptr[i + 1]):
+            row_of_pos[k] = i
+
+    row_of_nnz = np.empty(nnz, dtype=np.int64)
+    for m in range(nnz):
+        row_of_nnz[m] = row_of_pos[col_order[m]]
+
+    return col_indptr, col_order, row_of_nnz
 
 
 @nb.njit
@@ -234,3 +267,104 @@ def _sparse_mwu_batch(
         )
 
     return U_out, p_out
+
+
+@nb.njit(parallel=True)
+def _one_vs_rest_rank_sums_sparse(
+    data, col_indptr, col_order, row_of_nnz, labels, n_groups, group_sizes, n_rows
+):
+    """Sparse (CSR-column-index) counterpart of ``_one_vs_rest_rank_sums_dense``.
+
+    Zeros form a contiguous block at the bottom of each column's sorted order
+    (data is assumed non-negative); a group's zero rows contribute
+    ``count * zero_avg_rank`` to its rank sum without visiting them
+    individually, mirroring the zero-block trick used by ``_sparse_mwu_column``.
+
+    Parameters
+    ----------
+    data, col_indptr, col_order, row_of_nnz : see ``_build_col_index_with_rows``
+    labels : int64 array (n_rows,)
+        Group id of each row, in ``[0, n_groups)``.
+    n_groups : int
+    group_sizes : int64 array (n_groups,)
+    n_rows : int
+
+    Returns
+    -------
+    rank_sum : float64 array (n_groups, n_cols)
+    tie_term : float64 array (n_cols,)
+    """
+    n_cols = col_indptr.shape[0] - 1
+    rank_sum = np.zeros((n_groups, n_cols), dtype=np.float64)
+    tie_term = np.zeros(n_cols, dtype=np.float64)
+
+    for j in nb.prange(n_cols):  # type: ignore
+        start = col_indptr[j]
+        end = col_indptr[j + 1]
+        nnz = end - start
+        nz = n_rows - nnz
+
+        nnz_count = np.zeros(n_groups, dtype=np.int64)
+        group_rank_sum = np.zeros(n_groups, dtype=np.float64)
+        tie_term_nz = 0.0
+
+        if nnz > 0:
+            vals = np.empty(nnz, dtype=np.float64)
+            rows = np.empty(nnz, dtype=np.int64)
+            for k in range(nnz):
+                vals[k] = data[col_order[start + k]]
+                rows[k] = row_of_nnz[start + k]
+                nnz_count[labels[rows[k]]] += 1
+
+            order = np.argsort(vals)
+            i2 = 0
+            while i2 < nnz:
+                k = i2
+                while k < nnz - 1 and vals[order[k]] == vals[order[k + 1]]:
+                    k += 1
+                tie_count = float(k - i2 + 1)
+                tie_term_nz += tie_count * tie_count * tie_count - tie_count
+                global_avg = float(nz) + (i2 + k) / 2.0 + 1.0
+                for m in range(i2, k + 1):
+                    g = labels[rows[order[m]]]
+                    group_rank_sum[g] += global_avg
+                i2 = k + 1
+
+        zero_avg_rank = (float(nz) + 1.0) / 2.0
+        for g in range(n_groups):
+            rank_sum[g, j] = (
+                float(group_sizes[g] - nnz_count[g]) * zero_avg_rank + group_rank_sum[g]
+            )
+        tie_term[j] = (float(nz) * float(nz) * float(nz) - float(nz)) + tie_term_nz
+
+    return rank_sum, tie_term
+
+
+def _mannwhitneyu_one_vs_rest_sparse_batch(
+    data,
+    col_indptr,
+    col_order,
+    row_of_nnz,
+    labels,
+    n_groups,
+    group_sizes,
+    n_rows,
+    use_continuity,
+    alternative,
+):
+    """One-shot one-vs-rest Mann-Whitney U test across every group, sparse input.
+
+    Plain Python (not JIT-compiled itself) — just sequences the two JIT-compiled
+    kernels (rank sums, then the shared reduction from ``_batch.py``).
+
+    Returns
+    -------
+    U_out : float64 array (n_groups, n_cols)
+    p_out : float64 array (n_groups, n_cols)
+    """
+    rank_sum, tie_term = _one_vs_rest_rank_sums_sparse(
+        data, col_indptr, col_order, row_of_nnz, labels, n_groups, group_sizes, n_rows
+    )
+    return _mwu_stats_one_vs_rest(
+        rank_sum, tie_term, group_sizes, n_rows, use_continuity, alternative
+    )
