@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `numba-mwu` is a Numba-accelerated Mann-Whitney U test, designed as a drop-in replacement for `scipy.stats.mannwhitneyu(method="asymptotic")`. Key use case is batch testing for single-cell expression data with native CSR sparse matrix support.
 
+When bumping `version` in `pyproject.toml`, add a matching entry to `CHANGELOG.md` (Keep a Changelog format) in the same change.
+
 ## Commands
 
 ```bash

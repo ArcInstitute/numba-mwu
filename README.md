@@ -7,6 +7,8 @@ All functions use the asymptotic (normal approximation) method and produce resul
 
 > Note: This is only supported for 1D and 2D inputs.
 
+See [CHANGELOG.md](CHANGELOG.md) for release history.
+
 ## Installation
 
 ```bash
