@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bumped minimum supported Python version.
 - Added `ruff` to dev dependencies.
 
+### Fixed
+
+- `mannwhitneyu_one_vs_rest`: `labels` containing NaN or fractional values were silently cast into a valid-looking (usually wrong) integer group id instead of raising; now validated and rejected with a `ValueError`.
+- `mannwhitneyu_sparse` / `mannwhitneyu_one_vs_rest_sparse`: sparse input was never checked for NaN, and explicit stored zero entries (i.e. matrices not passed through `eliminate_zeros()`) silently broke the zero-block rank trick and produced wrong statistics. Both are now validated and rejected with a `ValueError`.
+
 ## [0.1.1] - 2026-02-24
 
 ### Added
