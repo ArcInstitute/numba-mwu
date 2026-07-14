@@ -1,5 +1,6 @@
 """Tests validating numba_mwu against scipy.stats.mannwhitneyu."""
 
+import numba as nb
 import numpy as np
 import pytest
 from scipy import sparse, stats
@@ -13,6 +14,7 @@ from numba_mwu import (
     mannwhitneyu_sparse,
     sparse_column_index,
 )
+from numba_mwu._batch import _select_parallel_axis
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1028,3 +1030,150 @@ class TestOneVsRestValidation:
         labels = np.array([0.0, 1.0, 1.9, 1.0])
         with pytest.raises(ValueError, match="integer"):
             mannwhitneyu_one_vs_rest(X, labels)
+
+
+# ---------------------------------------------------------------------------
+# parallel_axis: performance knob, must never affect the result
+# ---------------------------------------------------------------------------
+
+
+class TestParallelAxisHeuristic:
+    """Unit tests for the "auto" axis-selection heuristic itself.
+
+    Benchmarking (see numba-mwu's CLAUDE.md) found the crossover sits almost
+    exactly at the thread count: below it, "columns" wins on thread
+    utilization; at or above it, "groups" wins regardless of n_cols, since
+    "columns"'s strided-access cost scales with n_groups (the axis it loops
+    over internally), not with how many column-tasks run in parallel. Tests
+    query ``numba.get_num_threads()`` rather than hardcoding a thread count,
+    so they hold regardless of the machine running them.
+    """
+
+    def test_picks_columns_when_groups_below_thread_count(self):
+        """Few groups (below the thread count) but many columns: columns wins
+        the thread-utilization argument."""
+        n_threads = nb.get_num_threads()
+        if n_threads < 2:
+            pytest.skip("needs headroom below the thread count to exercise this branch")
+        assert _select_parallel_axis(n_groups=n_threads - 1, n_cols=10_000) == "columns"
+
+    def test_picks_groups_once_groups_reach_thread_count(self):
+        """Once n_groups >= thread count, groups wins regardless of n_cols."""
+        n_threads = nb.get_num_threads()
+        assert _select_parallel_axis(n_groups=n_threads, n_cols=2) == "groups"
+        assert _select_parallel_axis(n_groups=n_threads, n_cols=10_000) == "groups"
+        assert _select_parallel_axis(n_groups=n_threads * 10, n_cols=10_000) == "groups"
+
+    def test_below_threshold_picks_larger_axis(self):
+        """Both below the thread count: pick whichever axis is larger."""
+        n_threads = nb.get_num_threads()
+        if n_threads < 3:
+            pytest.skip("needs headroom below the thread count to exercise this branch")
+        small = n_threads - 2
+        assert _select_parallel_axis(n_groups=small, n_cols=small + 1) == "columns"
+        assert _select_parallel_axis(n_groups=small + 1, n_cols=small) == "groups"
+
+    def test_ties_pick_groups(self):
+        """Equal sizes below the thread count: tie-break favors groups (the
+        cache-friendly, contiguous-access default)."""
+        n_threads = nb.get_num_threads()
+        if n_threads < 2:
+            pytest.skip("needs headroom below the thread count to exercise this branch")
+        tie = n_threads - 1
+        assert _select_parallel_axis(n_groups=tie, n_cols=tie) == "groups"
+
+
+class TestParallelAxis:
+    """`parallel_axis` is a pure performance knob: every choice must produce
+    the identical result, since each (group, column) statistic is computed
+    independently regardless of loop order."""
+
+    def test_dense_groups_and_columns_match_scipy(self):
+        """Explicit 'groups' and 'columns' must both be correct, not just self-consistent."""
+        rng = np.random.default_rng(20)
+        X = rng.standard_normal((24, 8))
+        labels = np.array([0] * 6 + [1] * 10 + [2] * 8)
+        for axis in ("groups", "columns"):
+            result = mannwhitneyu_one_vs_rest(X, labels, parallel_axis=axis)
+            _assert_one_vs_rest_matches_scipy(result, X, labels)
+
+    def test_dense_auto_matches_explicit_bit_for_bit(self):
+        """'auto' must exactly match whichever axis it resolves to — few groups
+        (below the thread count), many columns (auto -> columns) and many
+        groups (at/above the thread count), few columns (auto -> groups).
+
+        Group/column counts are derived from ``numba.get_num_threads()``
+        rather than hardcoded, so this holds regardless of the machine's
+        thread count (see ``_select_parallel_axis``'s crossover)."""
+        n_threads = nb.get_num_threads()
+        if n_threads < 2:
+            pytest.skip("needs headroom below the thread count to exercise this branch")
+        rng = np.random.default_rng(21)
+
+        # Few groups (below the thread count), many columns
+        n_groups_wide = n_threads - 1
+        sizes = rng.integers(3, 6, size=n_groups_wide)
+        labels_wide = np.repeat(np.arange(n_groups_wide), sizes)
+        X_wide = rng.standard_normal((labels_wide.shape[0], 50))
+        auto_wide = mannwhitneyu_one_vs_rest(X_wide, labels_wide, parallel_axis="auto")
+        cols_wide = mannwhitneyu_one_vs_rest(
+            X_wide, labels_wide, parallel_axis="columns"
+        )
+        np.testing.assert_array_equal(auto_wide.statistic, cols_wide.statistic)
+        np.testing.assert_array_equal(auto_wide.pvalue, cols_wide.pvalue)
+
+        # Many groups (at/above the thread count), few columns
+        rng2 = np.random.default_rng(22)
+        n_groups_tall = n_threads + 5
+        labels_tall = np.repeat(np.arange(n_groups_tall), 3)
+        X_tall = rng2.standard_normal((labels_tall.shape[0], 2))
+        auto_tall = mannwhitneyu_one_vs_rest(X_tall, labels_tall, parallel_axis="auto")
+        groups_tall = mannwhitneyu_one_vs_rest(
+            X_tall, labels_tall, parallel_axis="groups"
+        )
+        np.testing.assert_array_equal(auto_tall.statistic, groups_tall.statistic)
+        np.testing.assert_array_equal(auto_tall.pvalue, groups_tall.pvalue)
+
+    def test_sparse_groups_and_columns_match_scipy(self):
+        rng = np.random.default_rng(23)
+        dense = rng.integers(0, 6, size=(28, 10)).astype(np.float64)
+        dense[dense < 2] = 0.0
+        labels = np.array([0] * 8 + [1] * 10 + [2] * 10)
+        X_sp = sparse.csr_matrix(dense)
+        X_sp.eliminate_zeros()
+        for axis in ("groups", "columns"):
+            result = mannwhitneyu_one_vs_rest_sparse(X_sp, labels, parallel_axis=axis)
+            _assert_one_vs_rest_matches_scipy(result, dense, labels)
+
+    def test_sparse_auto_matches_explicit_bit_for_bit(self):
+        """Few groups (below the thread count) -> auto resolves to 'columns'.
+        Group count derived from ``numba.get_num_threads()`` so this holds
+        regardless of the machine's thread count."""
+        n_threads = nb.get_num_threads()
+        if n_threads < 2:
+            pytest.skip("needs headroom below the thread count to exercise this branch")
+        rng = np.random.default_rng(24)
+        n_groups = n_threads - 1
+        sizes = rng.integers(3, 6, size=n_groups)
+        labels = np.repeat(np.arange(n_groups), sizes)
+        dense = rng.integers(0, 6, size=(labels.shape[0], 40)).astype(np.float64)
+        dense[dense < 2] = 0.0
+        X_sp = sparse.csr_matrix(dense)
+        X_sp.eliminate_zeros()
+
+        auto = mannwhitneyu_one_vs_rest_sparse(X_sp, labels, parallel_axis="auto")
+        cols = mannwhitneyu_one_vs_rest_sparse(X_sp, labels, parallel_axis="columns")
+        np.testing.assert_array_equal(auto.statistic, cols.statistic)
+        np.testing.assert_array_equal(auto.pvalue, cols.pvalue)
+
+    def test_invalid_parallel_axis_raises_dense(self):
+        X = np.zeros((6, 2))
+        labels = np.array([0, 0, 0, 1, 1, 1])
+        with pytest.raises(ValueError, match="parallel_axis"):
+            mannwhitneyu_one_vs_rest(X, labels, parallel_axis="rows")
+
+    def test_invalid_parallel_axis_raises_sparse(self):
+        X_sp = sparse.csr_matrix(np.zeros((6, 2)))
+        labels = np.array([0, 0, 0, 1, 1, 1])
+        with pytest.raises(ValueError, match="parallel_axis"):
+            mannwhitneyu_one_vs_rest_sparse(X_sp, labels, parallel_axis="rows")

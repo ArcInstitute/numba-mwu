@@ -110,6 +110,8 @@ result.pvalue     # shape (n_groups, n_genes)
 sparse_result = mannwhitneyu_one_vs_rest_sparse(adata.X, labels)
 ```
 
+Both functions accept `parallel_axis` (`"auto"` default, or `"groups"`/`"columns"`), which controls which axis the final reduction parallelizes over — a pure performance knob that never changes the result. Benchmarks showed `"groups"` wins once `n_groups` reaches the number of numba threads, regardless of `n_cols` (the strided access `"columns"` pays for scales with `n_groups`, not with how parallel it runs). `"auto"` picks `"groups"` past that threshold, and below it picks whichever of `n_groups`/`n_cols` is larger — e.g. with few groups but many genes (the common marker-gene case), parallelizing over columns instead keeps the thread pool busy.
+
 ## Benchmarks
 
 Run benchmarks with:

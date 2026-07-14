@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `mannwhitneyu_one_vs_rest` / `mannwhitneyu_one_vs_rest_sparse`: one-shot Mann-Whitney U test for N groups tested simultaneously against "everything else" (the common 1-vs-rest / marker-feature workflow). Each column is ranked exactly once and every group's statistic is derived from that single ranking, instead of the `O(n_groups)` cost of calling `mannwhitneyu_columns`/`mannwhitneyu_sparse` once per group in a loop.
+- `parallel_axis` option (`"auto"` (default), `"groups"`, or `"columns"`) on both one-vs-rest functions: controls which axis the final reduction step parallelizes over. Benchmarking showed `"groups"` wins once `n_groups` reaches the thread count regardless of `n_cols`; `"auto"` picks `"groups"` past that point and whichever of `n_groups`/`n_cols` is larger below it (the common few-groups-many-genes marker-feature case). Pure performance knob — never affects the result.
 - CI workflow (GitHub Actions): formatting (`ruff format --check`), type checking (`ty check`), and `pytest` across Python 3.11-3.13.
 - Publish workflow: builds and publishes to PyPI via trusted publishing when a GitHub Release is published.
 

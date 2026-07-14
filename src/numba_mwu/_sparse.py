@@ -351,11 +351,17 @@ def _mannwhitneyu_one_vs_rest_sparse_batch(
     n_rows,
     use_continuity,
     alternative,
+    parallel_axis="auto",
 ):
     """One-shot one-vs-rest Mann-Whitney U test across every group, sparse input.
 
     Plain Python (not JIT-compiled itself) — just sequences the two JIT-compiled
     kernels (rank sums, then the shared reduction from ``_batch.py``).
+
+    Parameters
+    ----------
+    parallel_axis : {'auto', 'groups', 'columns'}, optional
+        See ``_mwu_stats_one_vs_rest`` in ``_batch.py``.
 
     Returns
     -------
@@ -366,5 +372,11 @@ def _mannwhitneyu_one_vs_rest_sparse_batch(
         data, col_indptr, col_order, row_of_nnz, labels, n_groups, group_sizes, n_rows
     )
     return _mwu_stats_one_vs_rest(
-        rank_sum, tie_term, group_sizes, n_rows, use_continuity, alternative
+        rank_sum,
+        tie_term,
+        group_sizes,
+        n_rows,
+        use_continuity,
+        alternative,
+        parallel_axis,
     )

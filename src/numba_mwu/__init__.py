@@ -40,6 +40,8 @@ _ALTERNATIVE_MAP = {
     "greater": GREATER,
 }
 
+_PARALLEL_AXES = {"auto", "groups", "columns"}
+
 
 def _validate_alternative(alternative):
     alt = alternative.lower()
@@ -48,6 +50,14 @@ def _validate_alternative(alternative):
             f"`alternative` must be one of {set(_ALTERNATIVE_MAP)}, got {alternative!r}"
         )
     return _ALTERNATIVE_MAP[alt]
+
+
+def _validate_parallel_axis(parallel_axis):
+    if parallel_axis not in _PARALLEL_AXES:
+        raise ValueError(
+            f"`parallel_axis` must be one of {_PARALLEL_AXES}, got {parallel_axis!r}"
+        )
+    return parallel_axis
 
 
 def _validate_1d(arr, name):
@@ -214,7 +224,12 @@ def _validate_labels(labels, n_rows, n_groups):
 
 
 def mannwhitneyu_one_vs_rest(
-    X, labels, n_groups=None, use_continuity=True, alternative="two-sided"
+    X,
+    labels,
+    n_groups=None,
+    use_continuity=True,
+    alternative="two-sided",
+    parallel_axis="auto",
 ):
     """Run a one-vs-rest Mann-Whitney U test across every group in one shot.
 
@@ -242,6 +257,19 @@ def mannwhitneyu_one_vs_rest(
         Whether a continuity correction (1/2) should be applied. Default True.
     alternative : {'two-sided', 'less', 'greater'}, optional
         Defines the alternative hypothesis. Default is 'two-sided'.
+    parallel_axis : {'auto', 'groups', 'columns'}, optional
+        Which axis the final reduction step parallelizes over — a pure
+        performance knob, never affects the result (every ``(group, column)``
+        statistic is computed independently). ``'auto'`` (default) picks
+        "groups" once ``n_groups`` reaches the number of numba threads —
+        benchmarks show it wins from there on regardless of ``n_cols``,
+        since "columns"'s strided access cost scales with ``n_groups``
+        independent of how parallel it runs. Below that thread-count
+        threshold (e.g. a handful of clusters tested against tens of
+        thousands of genes), it picks whichever of ``n_groups``/``n_cols`` is
+        larger, to keep as many threads busy as possible. Pass ``'groups'``
+        or ``'columns'`` explicitly to override the heuristic (e.g. after
+        profiling your own workload).
 
     Returns
     -------
@@ -253,8 +281,9 @@ def mannwhitneyu_one_vs_rest(
     X = _validate_2d(X, "X")
     labels, n_groups, group_sizes = _validate_labels(labels, X.shape[0], n_groups)
     alt = _validate_alternative(alternative)
+    axis = _validate_parallel_axis(parallel_axis)
     stats, pvals = _mannwhitneyu_one_vs_rest_columns(
-        X, labels, n_groups, group_sizes, use_continuity, alt
+        X, labels, n_groups, group_sizes, use_continuity, alt, axis
     )
     return MannWhitneyUResult(stats, pvals)
 
@@ -395,7 +424,12 @@ def mannwhitneyu_sparse(X, Y, use_continuity=True, alternative="two-sided"):
 
 
 def mannwhitneyu_one_vs_rest_sparse(
-    X, labels, n_groups=None, use_continuity=True, alternative="two-sided"
+    X,
+    labels,
+    n_groups=None,
+    use_continuity=True,
+    alternative="two-sided",
+    parallel_axis="auto",
 ):
     """Sparse (CSR) counterpart of ``mannwhitneyu_one_vs_rest``.
 
@@ -420,6 +454,10 @@ def mannwhitneyu_one_vs_rest_sparse(
         Whether to apply continuity correction. Default True.
     alternative : {'two-sided', 'less', 'greater'}, optional
         Alternative hypothesis. Default 'two-sided'.
+    parallel_axis : {'auto', 'groups', 'columns'}, optional
+        See ``mannwhitneyu_one_vs_rest`` — a pure performance knob for the
+        final reduction step, never affects the result. ``'auto'`` (default)
+        picks whichever of ``n_groups``/``n_cols`` is larger.
 
     Returns
     -------
@@ -431,6 +469,7 @@ def mannwhitneyu_one_vs_rest_sparse(
     n_rows = X.shape[0]
     labels, n_groups, group_sizes = _validate_labels(labels, n_rows, n_groups)
     alt = _validate_alternative(alternative)
+    axis = _validate_parallel_axis(parallel_axis)
 
     data = np.ascontiguousarray(X.data, dtype=np.float64)
     indptr = np.ascontiguousarray(X.indptr)
@@ -450,5 +489,6 @@ def mannwhitneyu_one_vs_rest_sparse(
         n_rows,
         use_continuity,
         alt,
+        axis,
     )
     return MannWhitneyUResult(stats, pvals)
