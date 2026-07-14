@@ -183,6 +183,11 @@ def _validate_labels(labels, n_rows, n_groups):
         )
     if labels.shape[0] == 0:
         raise ValueError("`labels` must be of nonzero size.")
+    if np.issubdtype(labels.dtype, np.floating):
+        if np.any(np.isnan(labels)):
+            raise ValueError("`labels` must not contain NaNs.")
+        if np.any(labels != np.round(labels)):
+            raise ValueError("`labels` must contain only integer-valued labels.")
     labels = labels.astype(np.int64)
     if labels.min() < 0:
         raise ValueError("`labels` must not contain negative values.")
@@ -263,12 +268,20 @@ def _validate_csr(X, name):
         raise TypeError(
             f"`{name}` must be in CSR format. Convert with `{name}.tocsr()` if needed."
         )
-    if X.data.size > 0 and X.data.min() < 0:
-        raise ValueError(
-            f"Sparse MWU requires non-negative data in `{name}`. "
-            "For data with negative values, convert to dense and use "
-            "mannwhitneyu_columns."
-        )
+    if X.data.size > 0:
+        if np.any(np.isnan(X.data)):
+            raise ValueError(f"`{name}` must not contain NaNs.")
+        if np.any(X.data < 0):
+            raise ValueError(
+                f"Sparse MWU requires non-negative data in `{name}`. "
+                "For data with negative values, convert to dense and use "
+                "mannwhitneyu_columns."
+            )
+        if np.any(X.data == 0):
+            raise ValueError(
+                f"`{name}` must not contain explicit zero entries. "
+                f"Call `{name}.eliminate_zeros()` first."
+            )
     return X
 
 

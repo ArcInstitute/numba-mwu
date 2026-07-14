@@ -598,6 +598,21 @@ class TestSparse:
         with pytest.raises(ValueError, match="non-negative"):
             mannwhitneyu_sparse(X_sp, Y_sp)
 
+    def test_sparse_nan_rejected(self):
+        """NaN stored data must raise, not silently produce wrong output (regression)."""
+        X_sp = sparse.csr_matrix(np.array([[1.0, 2.0]]))
+        Y_sp = sparse.csr_matrix(np.array([[np.nan, 4.0]]))
+        with pytest.raises(ValueError, match="NaN"):
+            mannwhitneyu_sparse(X_sp, Y_sp)
+
+    def test_sparse_explicit_zero_entries_rejected(self):
+        """Explicit stored zeros break the zero-block rank trick; must raise (regression)."""
+        X_sp = sparse.csr_matrix(np.array([[1.0, 2.0]]))
+        Y_sp = sparse.csr_matrix(np.array([[3.0, 4.0]]))
+        Y_sp.data[0] = 0.0
+        with pytest.raises(ValueError, match="explicit zero"):
+            mannwhitneyu_sparse(X_sp, Y_sp)
+
     def test_sparse_non_csr_rejected(self):
         """Non-CSR format should raise TypeError."""
         X_sp = sparse.csr_matrix(np.array([[1, 2]], dtype=np.float64))
@@ -935,6 +950,27 @@ class TestOneVsRestSparse:
         with pytest.raises(TypeError, match="CSR"):
             mannwhitneyu_one_vs_rest_sparse(X_csc, np.array([0, 1]))
 
+    def test_nan_values_rejected(self):
+        """NaN stored data must raise, not silently produce wrong output (regression)."""
+        dense = np.array([[1.0, 2.0], [np.nan, 4.0], [5.0, 6.0]])
+        X_sp = sparse.csr_matrix(dense)
+        with pytest.raises(ValueError, match="NaN"):
+            mannwhitneyu_one_vs_rest_sparse(X_sp, np.array([0, 0, 1]))
+
+    def test_explicit_zero_entries_rejected(self):
+        """Explicit stored zeros break the zero-block rank trick; must raise (regression).
+
+        Without ``eliminate_zeros()``, a column mixing an explicitly stored
+        ``0.0`` with implicit (unstored) zeros previously produced silently
+        wrong rank sums instead of an error.
+        """
+        dense = np.array([[0.0, 1.0], [2.0, 0.0], [0.0, 3.0], [4.0, 0.0]])
+        X_sp = sparse.csr_matrix(dense)
+        # Re-insert one explicit zero without eliminating it.
+        X_sp.data[0] = 0.0
+        with pytest.raises(ValueError, match="explicit zero"):
+            mannwhitneyu_one_vs_rest_sparse(X_sp, np.array([0, 0, 1, 1]))
+
 
 # ---------------------------------------------------------------------------
 # One-vs-rest label validation
@@ -978,3 +1014,17 @@ class TestOneVsRestValidation:
         labels = np.array([0, 1, 2, 0])
         with pytest.raises(ValueError, match="smaller than the largest label"):
             mannwhitneyu_one_vs_rest(X, labels, n_groups=2)
+
+    def test_nan_label_raises(self):
+        """A NaN label must not silently cast to a valid group id (regression)."""
+        X = np.zeros((4, 2))
+        labels = np.array([0.0, 1.0, np.nan, 1.0])
+        with pytest.raises(ValueError, match="NaN"):
+            mannwhitneyu_one_vs_rest(X, labels)
+
+    def test_non_integer_label_raises(self):
+        """A fractional label must not silently truncate into another group (regression)."""
+        X = np.zeros((4, 2))
+        labels = np.array([0.0, 1.0, 1.9, 1.0])
+        with pytest.raises(ValueError, match="integer"):
+            mannwhitneyu_one_vs_rest(X, labels)
