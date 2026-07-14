@@ -1,5 +1,6 @@
 """Tests validating numba_mwu against scipy.stats.mannwhitneyu."""
 
+import numba as nb
 import numpy as np
 import pytest
 from scipy import sparse, stats
@@ -7,10 +8,13 @@ from scipy import sparse, stats
 from numba_mwu import (
     mannwhitneyu,
     mannwhitneyu_columns,
+    mannwhitneyu_one_vs_rest,
+    mannwhitneyu_one_vs_rest_sparse,
     mannwhitneyu_rows,
     mannwhitneyu_sparse,
     sparse_column_index,
 )
+from numba_mwu._batch import _select_parallel_axis
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -596,6 +600,21 @@ class TestSparse:
         with pytest.raises(ValueError, match="non-negative"):
             mannwhitneyu_sparse(X_sp, Y_sp)
 
+    def test_sparse_nan_rejected(self):
+        """NaN stored data must raise, not silently produce wrong output (regression)."""
+        X_sp = sparse.csr_matrix(np.array([[1.0, 2.0]]))
+        Y_sp = sparse.csr_matrix(np.array([[np.nan, 4.0]]))
+        with pytest.raises(ValueError, match="NaN"):
+            mannwhitneyu_sparse(X_sp, Y_sp)
+
+    def test_sparse_explicit_zero_entries_rejected(self):
+        """Explicit stored zeros break the zero-block rank trick; must raise (regression)."""
+        X_sp = sparse.csr_matrix(np.array([[1.0, 2.0]]))
+        Y_sp = sparse.csr_matrix(np.array([[3.0, 4.0]]))
+        Y_sp.data[0] = 0.0
+        with pytest.raises(ValueError, match="explicit zero"):
+            mannwhitneyu_sparse(X_sp, Y_sp)
+
     def test_sparse_non_csr_rejected(self):
         """Non-CSR format should raise TypeError."""
         X_sp = sparse.csr_matrix(np.array([[1, 2]], dtype=np.float64))
@@ -743,3 +762,418 @@ class TestSparseColumnIndex:
             pre = mannwhitneyu_sparse(X_sp, Y_idx, alternative=alt)
             np.testing.assert_array_equal(raw.statistic, pre.statistic)
             np.testing.assert_array_equal(raw.pvalue, pre.pvalue)
+
+
+# ---------------------------------------------------------------------------
+# One-vs-rest (N groups tested simultaneously against "everything else")
+# ---------------------------------------------------------------------------
+
+
+def _assert_one_vs_rest_matches_scipy(
+    result, dense, labels, use_continuity=True, alternative="two-sided", skip_cols=()
+):
+    """Cross-check every (group, column) pair against an independently computed
+    scipy.stats.mannwhitneyu — validates the multi-group rank-sum reduction
+    from first principles, not just by diffing against another numba_mwu path."""
+    n_groups = int(labels.max()) + 1
+    for g in range(n_groups):
+        mask = labels == g
+        for j in range(dense.shape[1]):
+            if j in skip_cols:
+                continue
+            expected = _scipy_mwu(
+                dense[mask, j],
+                dense[~mask, j],
+                use_continuity=use_continuity,
+                alternative=alternative,
+            )
+            assert np.isclose(result.statistic[g, j], expected.statistic), (
+                f"stat mismatch group={g} col={j}"
+            )
+            assert np.isclose(result.pvalue[g, j], expected.pvalue), (
+                f"pvalue mismatch group={g} col={j}"
+            )
+
+
+class TestOneVsRest:
+    """Validate mannwhitneyu_one_vs_rest (dense) against scipy."""
+
+    def test_matches_scipy_multi_group(self):
+        rng = np.random.default_rng(2)
+        n_rows, n_cols = 30, 10
+        X = rng.standard_normal((n_rows, n_cols))
+        labels = np.array([0] * 8 + [1] * 12 + [2] * 10)
+        # Shift group 1 so there's a real effect to detect
+        X[8:20] += 1.5
+
+        result = mannwhitneyu_one_vs_rest(X, labels)
+        assert result.statistic.shape == (3, n_cols)
+        assert result.pvalue.shape == (3, n_cols)
+        _assert_one_vs_rest_matches_scipy(result, X, labels)
+
+    def test_matches_sequential_columns_calls(self):
+        """Result must equal calling mannwhitneyu_columns(group, rest) per group."""
+        rng = np.random.default_rng(3)
+        n_rows, n_cols = 25, 6
+        X = rng.standard_normal((n_rows, n_cols))
+        labels = np.array([0] * 5 + [1] * 9 + [2] * 4 + [3] * 7)
+
+        result = mannwhitneyu_one_vs_rest(X, labels)
+        for g in range(4):
+            mask = labels == g
+            expected = mannwhitneyu_columns(X[mask], X[~mask])
+            np.testing.assert_allclose(result.statistic[g], expected.statistic)
+            np.testing.assert_allclose(result.pvalue[g], expected.pvalue)
+
+    def test_group_of_size_one(self):
+        rng = np.random.default_rng(4)
+        X = rng.standard_normal((10, 3))
+        labels = np.array([0] + [1] * 9)
+        result = mannwhitneyu_one_vs_rest(X, labels)
+        _assert_one_vs_rest_matches_scipy(result, X, labels)
+
+    def test_ties_spanning_groups(self):
+        """Ties across group boundaries share one tie-correction term."""
+        X = np.array([[1.0], [1.0], [2.0], [2.0], [3.0], [1.0]])
+        labels = np.array([0, 0, 1, 1, 2, 2])
+        result = mannwhitneyu_one_vs_rest(X, labels)
+        _assert_one_vs_rest_matches_scipy(result, X, labels)
+
+    def test_all_identical_column_gives_pvalue_one(self):
+        """A fully-tied column needs no special-casing: s_sq <= 0 -> p = 1.0."""
+        X = np.full((9, 1), 5.0)
+        labels = np.array([0, 0, 0, 1, 1, 1, 2, 2, 2])
+        result = mannwhitneyu_one_vs_rest(X, labels)
+        np.testing.assert_allclose(result.pvalue, 1.0)
+        assert np.isfinite(result.statistic).all()
+
+    def test_alternatives(self):
+        rng = np.random.default_rng(5)
+        X = rng.standard_normal((20, 4))
+        labels = np.array([0] * 6 + [1] * 8 + [2] * 6)
+        for alt in ("two-sided", "less", "greater"):
+            result = mannwhitneyu_one_vs_rest(X, labels, alternative=alt)
+            _assert_one_vs_rest_matches_scipy(result, X, labels, alternative=alt)
+
+    def test_continuity(self):
+        rng = np.random.default_rng(6)
+        X = rng.integers(0, 8, size=(18, 3)).astype(np.float64)
+        labels = np.array([0] * 6 + [1] * 6 + [2] * 6)
+        for cont in (True, False):
+            result = mannwhitneyu_one_vs_rest(X, labels, use_continuity=cont)
+            _assert_one_vs_rest_matches_scipy(result, X, labels, use_continuity=cont)
+
+    def test_explicit_n_groups(self):
+        """n_groups can exceed the largest observed label (all-present here)."""
+        rng = np.random.default_rng(7)
+        X = rng.standard_normal((12, 2))
+        labels = np.array([0] * 4 + [1] * 4 + [2] * 4)
+        result = mannwhitneyu_one_vs_rest(X, labels, n_groups=3)
+        _assert_one_vs_rest_matches_scipy(result, X, labels)
+
+
+class TestOneVsRestSparse:
+    """Validate mannwhitneyu_one_vs_rest_sparse against dense and scipy."""
+
+    def test_matches_dense(self):
+        rng = np.random.default_rng(8)
+        n_rows, n_cols = 40, 12
+        dense = rng.integers(0, 6, size=(n_rows, n_cols)).astype(np.float64)
+        dense[dense < 2] = 0.0  # induce sparsity
+        labels = np.array([0] * 10 + [1] * 15 + [2] * 15)
+
+        X_sp = sparse.csr_matrix(dense)
+        X_sp.eliminate_zeros()
+
+        dense_result = mannwhitneyu_one_vs_rest(dense, labels)
+        sparse_result = mannwhitneyu_one_vs_rest_sparse(X_sp, labels)
+        np.testing.assert_allclose(
+            dense_result.statistic, sparse_result.statistic, rtol=1e-8
+        )
+        np.testing.assert_allclose(
+            dense_result.pvalue, sparse_result.pvalue, rtol=1e-8, atol=1e-10
+        )
+
+    def test_matches_scipy(self):
+        rng = np.random.default_rng(9)
+        n_rows, n_cols = 35, 8
+        dense = rng.integers(0, 5, size=(n_rows, n_cols)).astype(np.float64)
+        dense[dense < 1.5] = 0.0
+        labels = np.array([0] * 8 + [1] * 12 + [2] * 15)
+
+        X_sp = sparse.csr_matrix(dense)
+        X_sp.eliminate_zeros()
+        result = mannwhitneyu_one_vs_rest_sparse(X_sp, labels)
+        _assert_one_vs_rest_matches_scipy(result, dense, labels)
+
+    def test_all_zero_column_gives_pvalue_one(self):
+        n_rows, n_cols = 12, 3
+        dense = np.zeros((n_rows, n_cols), dtype=np.float64)
+        dense[:6, 0] = [1, 2, 3, 4, 5, 6]
+        dense[6:, 2] = [7, 8, 9, 10, 11, 12]
+        labels = np.array([0] * 4 + [1] * 4 + [2] * 4)
+
+        X_sp = sparse.csr_matrix(dense)
+        X_sp.eliminate_zeros()
+        result = mannwhitneyu_one_vs_rest_sparse(X_sp, labels)
+        np.testing.assert_allclose(result.pvalue[:, 1], 1.0)
+        assert np.isfinite(result.statistic[:, 1]).all()
+
+    def test_no_zeros_column(self):
+        """A column with no zeros at all (fully dense within a sparse matrix)."""
+        rng = np.random.default_rng(10)
+        dense = rng.integers(1, 50, size=(15, 3)).astype(np.float64)
+        labels = np.array([0] * 5 + [1] * 5 + [2] * 5)
+
+        X_sp = sparse.csr_matrix(dense)
+        X_sp.eliminate_zeros()
+        result = mannwhitneyu_one_vs_rest_sparse(X_sp, labels)
+        _assert_one_vs_rest_matches_scipy(result, dense, labels)
+
+    def test_alternatives(self):
+        rng = np.random.default_rng(11)
+        dense = rng.integers(0, 8, size=(24, 4)).astype(np.float64)
+        dense[dense < 2] = 0.0
+        labels = np.array([0] * 8 + [1] * 8 + [2] * 8)
+
+        X_sp = sparse.csr_matrix(dense)
+        X_sp.eliminate_zeros()
+        for alt in ("two-sided", "less", "greater"):
+            result = mannwhitneyu_one_vs_rest_sparse(X_sp, labels, alternative=alt)
+            _assert_one_vs_rest_matches_scipy(result, dense, labels, alternative=alt)
+
+    def test_negative_values_rejected(self):
+        X_sp = sparse.csr_matrix(np.array([[1.0, -2.0], [3.0, 4.0]]))
+        with pytest.raises(ValueError, match="non-negative"):
+            mannwhitneyu_one_vs_rest_sparse(X_sp, np.array([0, 1]))
+
+    def test_non_csr_rejected(self):
+        X_csc = sparse.csc_matrix(np.array([[1.0, 2.0], [3.0, 4.0]]))
+        with pytest.raises(TypeError, match="CSR"):
+            mannwhitneyu_one_vs_rest_sparse(X_csc, np.array([0, 1]))
+
+    def test_nan_values_rejected(self):
+        """NaN stored data must raise, not silently produce wrong output (regression)."""
+        dense = np.array([[1.0, 2.0], [np.nan, 4.0], [5.0, 6.0]])
+        X_sp = sparse.csr_matrix(dense)
+        with pytest.raises(ValueError, match="NaN"):
+            mannwhitneyu_one_vs_rest_sparse(X_sp, np.array([0, 0, 1]))
+
+    def test_explicit_zero_entries_rejected(self):
+        """Explicit stored zeros break the zero-block rank trick; must raise (regression).
+
+        Without ``eliminate_zeros()``, a column mixing an explicitly stored
+        ``0.0`` with implicit (unstored) zeros previously produced silently
+        wrong rank sums instead of an error.
+        """
+        dense = np.array([[0.0, 1.0], [2.0, 0.0], [0.0, 3.0], [4.0, 0.0]])
+        X_sp = sparse.csr_matrix(dense)
+        # Re-insert one explicit zero without eliminating it.
+        X_sp.data[0] = 0.0
+        with pytest.raises(ValueError, match="explicit zero"):
+            mannwhitneyu_one_vs_rest_sparse(X_sp, np.array([0, 0, 1, 1]))
+
+
+# ---------------------------------------------------------------------------
+# One-vs-rest label validation
+# ---------------------------------------------------------------------------
+
+
+class TestOneVsRestValidation:
+    def test_single_group_raises(self):
+        X = np.zeros((6, 2))
+        labels = np.zeros(6, dtype=int)
+        with pytest.raises(ValueError, match="at least 2 groups"):
+            mannwhitneyu_one_vs_rest(X, labels)
+
+    def test_empty_group_raises(self):
+        """n_groups larger than the observed labels leaves a group with no rows."""
+        X = np.zeros((6, 2))
+        labels = np.array([0, 0, 0, 1, 1, 1])
+        with pytest.raises(ValueError, match="no rows"):
+            mannwhitneyu_one_vs_rest(X, labels, n_groups=3)
+
+    def test_negative_label_raises(self):
+        X = np.zeros((4, 2))
+        labels = np.array([0, 1, -1, 1])
+        with pytest.raises(ValueError, match="negative"):
+            mannwhitneyu_one_vs_rest(X, labels)
+
+    def test_wrong_length_raises(self):
+        X = np.zeros((5, 2))
+        labels = np.array([0, 1, 1])
+        with pytest.raises(ValueError, match="length"):
+            mannwhitneyu_one_vs_rest(X, labels)
+
+    def test_2d_labels_raises(self):
+        X = np.zeros((4, 2))
+        labels = np.zeros((4, 1))
+        with pytest.raises(ValueError, match="1-dimensional"):
+            mannwhitneyu_one_vs_rest(X, labels)
+
+    def test_n_groups_smaller_than_max_label_raises(self):
+        X = np.zeros((4, 2))
+        labels = np.array([0, 1, 2, 0])
+        with pytest.raises(ValueError, match="smaller than the largest label"):
+            mannwhitneyu_one_vs_rest(X, labels, n_groups=2)
+
+    def test_nan_label_raises(self):
+        """A NaN label must not silently cast to a valid group id (regression)."""
+        X = np.zeros((4, 2))
+        labels = np.array([0.0, 1.0, np.nan, 1.0])
+        with pytest.raises(ValueError, match="NaN"):
+            mannwhitneyu_one_vs_rest(X, labels)
+
+    def test_non_integer_label_raises(self):
+        """A fractional label must not silently truncate into another group (regression)."""
+        X = np.zeros((4, 2))
+        labels = np.array([0.0, 1.0, 1.9, 1.0])
+        with pytest.raises(ValueError, match="integer"):
+            mannwhitneyu_one_vs_rest(X, labels)
+
+
+# ---------------------------------------------------------------------------
+# parallel_axis: performance knob, must never affect the result
+# ---------------------------------------------------------------------------
+
+
+class TestParallelAxisHeuristic:
+    """Unit tests for the "auto" axis-selection heuristic itself.
+
+    Benchmarking (see numba-mwu's CLAUDE.md) found the crossover sits almost
+    exactly at the thread count: below it, "columns" wins on thread
+    utilization; at or above it, "groups" wins regardless of n_cols, since
+    "columns"'s strided-access cost scales with n_groups (the axis it loops
+    over internally), not with how many column-tasks run in parallel. Tests
+    query ``numba.get_num_threads()`` rather than hardcoding a thread count,
+    so they hold regardless of the machine running them.
+    """
+
+    def test_picks_columns_when_groups_below_thread_count(self):
+        """Few groups (below the thread count) but many columns: columns wins
+        the thread-utilization argument."""
+        n_threads = nb.get_num_threads()
+        if n_threads < 2:
+            pytest.skip("needs headroom below the thread count to exercise this branch")
+        assert _select_parallel_axis(n_groups=n_threads - 1, n_cols=10_000) == "columns"
+
+    def test_picks_groups_once_groups_reach_thread_count(self):
+        """Once n_groups >= thread count, groups wins regardless of n_cols."""
+        n_threads = nb.get_num_threads()
+        assert _select_parallel_axis(n_groups=n_threads, n_cols=2) == "groups"
+        assert _select_parallel_axis(n_groups=n_threads, n_cols=10_000) == "groups"
+        assert _select_parallel_axis(n_groups=n_threads * 10, n_cols=10_000) == "groups"
+
+    def test_below_threshold_picks_larger_axis(self):
+        """Both below the thread count: pick whichever axis is larger."""
+        n_threads = nb.get_num_threads()
+        if n_threads < 3:
+            pytest.skip("needs headroom below the thread count to exercise this branch")
+        small = n_threads - 2
+        assert _select_parallel_axis(n_groups=small, n_cols=small + 1) == "columns"
+        assert _select_parallel_axis(n_groups=small + 1, n_cols=small) == "groups"
+
+    def test_ties_pick_groups(self):
+        """Equal sizes below the thread count: tie-break favors groups (the
+        cache-friendly, contiguous-access default)."""
+        n_threads = nb.get_num_threads()
+        if n_threads < 2:
+            pytest.skip("needs headroom below the thread count to exercise this branch")
+        tie = n_threads - 1
+        assert _select_parallel_axis(n_groups=tie, n_cols=tie) == "groups"
+
+
+class TestParallelAxis:
+    """`parallel_axis` is a pure performance knob: every choice must produce
+    the identical result, since each (group, column) statistic is computed
+    independently regardless of loop order."""
+
+    def test_dense_groups_and_columns_match_scipy(self):
+        """Explicit 'groups' and 'columns' must both be correct, not just self-consistent."""
+        rng = np.random.default_rng(20)
+        X = rng.standard_normal((24, 8))
+        labels = np.array([0] * 6 + [1] * 10 + [2] * 8)
+        for axis in ("groups", "columns"):
+            result = mannwhitneyu_one_vs_rest(X, labels, parallel_axis=axis)
+            _assert_one_vs_rest_matches_scipy(result, X, labels)
+
+    def test_dense_auto_matches_explicit_bit_for_bit(self):
+        """'auto' must exactly match whichever axis it resolves to — few groups
+        (below the thread count), many columns (auto -> columns) and many
+        groups (at/above the thread count), few columns (auto -> groups).
+
+        Group/column counts are derived from ``numba.get_num_threads()``
+        rather than hardcoded, so this holds regardless of the machine's
+        thread count (see ``_select_parallel_axis``'s crossover)."""
+        n_threads = nb.get_num_threads()
+        if n_threads < 2:
+            pytest.skip("needs headroom below the thread count to exercise this branch")
+        rng = np.random.default_rng(21)
+
+        # Few groups (below the thread count), many columns
+        n_groups_wide = n_threads - 1
+        sizes = rng.integers(3, 6, size=n_groups_wide)
+        labels_wide = np.repeat(np.arange(n_groups_wide), sizes)
+        X_wide = rng.standard_normal((labels_wide.shape[0], 50))
+        auto_wide = mannwhitneyu_one_vs_rest(X_wide, labels_wide, parallel_axis="auto")
+        cols_wide = mannwhitneyu_one_vs_rest(
+            X_wide, labels_wide, parallel_axis="columns"
+        )
+        np.testing.assert_array_equal(auto_wide.statistic, cols_wide.statistic)
+        np.testing.assert_array_equal(auto_wide.pvalue, cols_wide.pvalue)
+
+        # Many groups (at/above the thread count), few columns
+        rng2 = np.random.default_rng(22)
+        n_groups_tall = n_threads + 5
+        labels_tall = np.repeat(np.arange(n_groups_tall), 3)
+        X_tall = rng2.standard_normal((labels_tall.shape[0], 2))
+        auto_tall = mannwhitneyu_one_vs_rest(X_tall, labels_tall, parallel_axis="auto")
+        groups_tall = mannwhitneyu_one_vs_rest(
+            X_tall, labels_tall, parallel_axis="groups"
+        )
+        np.testing.assert_array_equal(auto_tall.statistic, groups_tall.statistic)
+        np.testing.assert_array_equal(auto_tall.pvalue, groups_tall.pvalue)
+
+    def test_sparse_groups_and_columns_match_scipy(self):
+        rng = np.random.default_rng(23)
+        dense = rng.integers(0, 6, size=(28, 10)).astype(np.float64)
+        dense[dense < 2] = 0.0
+        labels = np.array([0] * 8 + [1] * 10 + [2] * 10)
+        X_sp = sparse.csr_matrix(dense)
+        X_sp.eliminate_zeros()
+        for axis in ("groups", "columns"):
+            result = mannwhitneyu_one_vs_rest_sparse(X_sp, labels, parallel_axis=axis)
+            _assert_one_vs_rest_matches_scipy(result, dense, labels)
+
+    def test_sparse_auto_matches_explicit_bit_for_bit(self):
+        """Few groups (below the thread count) -> auto resolves to 'columns'.
+        Group count derived from ``numba.get_num_threads()`` so this holds
+        regardless of the machine's thread count."""
+        n_threads = nb.get_num_threads()
+        if n_threads < 2:
+            pytest.skip("needs headroom below the thread count to exercise this branch")
+        rng = np.random.default_rng(24)
+        n_groups = n_threads - 1
+        sizes = rng.integers(3, 6, size=n_groups)
+        labels = np.repeat(np.arange(n_groups), sizes)
+        dense = rng.integers(0, 6, size=(labels.shape[0], 40)).astype(np.float64)
+        dense[dense < 2] = 0.0
+        X_sp = sparse.csr_matrix(dense)
+        X_sp.eliminate_zeros()
+
+        auto = mannwhitneyu_one_vs_rest_sparse(X_sp, labels, parallel_axis="auto")
+        cols = mannwhitneyu_one_vs_rest_sparse(X_sp, labels, parallel_axis="columns")
+        np.testing.assert_array_equal(auto.statistic, cols.statistic)
+        np.testing.assert_array_equal(auto.pvalue, cols.pvalue)
+
+    def test_invalid_parallel_axis_raises_dense(self):
+        X = np.zeros((6, 2))
+        labels = np.array([0, 0, 0, 1, 1, 1])
+        with pytest.raises(ValueError, match="parallel_axis"):
+            mannwhitneyu_one_vs_rest(X, labels, parallel_axis="rows")
+
+    def test_invalid_parallel_axis_raises_sparse(self):
+        X_sp = sparse.csr_matrix(np.zeros((6, 2)))
+        labels = np.array([0, 0, 0, 1, 1, 1])
+        with pytest.raises(ValueError, match="parallel_axis"):
+            mannwhitneyu_one_vs_rest_sparse(X_sp, labels, parallel_axis="rows")

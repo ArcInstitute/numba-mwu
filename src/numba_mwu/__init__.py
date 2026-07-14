@@ -4,9 +4,18 @@ from collections import namedtuple
 
 import numpy as np
 
-from ._batch import _mannwhitneyu_columns, _mannwhitneyu_rows
+from ._batch import (
+    _mannwhitneyu_columns,
+    _mannwhitneyu_one_vs_rest_columns,
+    _mannwhitneyu_rows,
+)
 from ._core import GREATER, LESS, TWO_SIDED, _mannwhitneyu_single
-from ._sparse import _build_col_index, _sparse_mwu_batch
+from ._sparse import (
+    _build_col_index,
+    _build_col_index_with_rows,
+    _mannwhitneyu_one_vs_rest_sparse_batch,
+    _sparse_mwu_batch,
+)
 
 __all__ = [
     "MannWhitneyUResult",
@@ -15,6 +24,8 @@ __all__ = [
     "mannwhitneyu_rows",
     "mannwhitneyu_columns",
     "mannwhitneyu_sparse",
+    "mannwhitneyu_one_vs_rest",
+    "mannwhitneyu_one_vs_rest_sparse",
     "sparse_column_index",
 ]
 
@@ -29,6 +40,8 @@ _ALTERNATIVE_MAP = {
     "greater": GREATER,
 }
 
+_PARALLEL_AXES = {"auto", "groups", "columns"}
+
 
 def _validate_alternative(alternative):
     alt = alternative.lower()
@@ -37,6 +50,14 @@ def _validate_alternative(alternative):
             f"`alternative` must be one of {set(_ALTERNATIVE_MAP)}, got {alternative!r}"
         )
     return _ALTERNATIVE_MAP[alt]
+
+
+def _validate_parallel_axis(parallel_axis):
+    if parallel_axis not in _PARALLEL_AXES:
+        raise ValueError(
+            f"`parallel_axis` must be one of {_PARALLEL_AXES}, got {parallel_axis!r}"
+        )
+    return parallel_axis
 
 
 def _validate_1d(arr, name):
@@ -154,6 +175,119 @@ def mannwhitneyu_columns(X, Y, use_continuity=True, alternative="two-sided"):
     return MannWhitneyUResult(stats, pvals)
 
 
+def _validate_labels(labels, n_rows, n_groups):
+    """Validate a one-vs-rest group-label array.
+
+    Returns
+    -------
+    labels : int64 array (n_rows,)
+    n_groups : int
+    group_sizes : int64 array (n_groups,)
+    """
+    labels = np.asarray(labels)
+    if labels.ndim != 1:
+        raise ValueError(f"`labels` must be 1-dimensional, got ndim={labels.ndim}")
+    if labels.shape[0] != n_rows:
+        raise ValueError(
+            f"`labels` must have length {n_rows} (one per row), got {labels.shape[0]}"
+        )
+    if labels.shape[0] == 0:
+        raise ValueError("`labels` must be of nonzero size.")
+    if np.issubdtype(labels.dtype, np.floating):
+        if np.any(np.isnan(labels)):
+            raise ValueError("`labels` must not contain NaNs.")
+        if np.any(labels != np.round(labels)):
+            raise ValueError("`labels` must contain only integer-valued labels.")
+    labels = labels.astype(np.int64)
+    if labels.min() < 0:
+        raise ValueError("`labels` must not contain negative values.")
+
+    inferred_n_groups = int(labels.max()) + 1
+    if n_groups is None:
+        n_groups = inferred_n_groups
+    elif n_groups < inferred_n_groups:
+        raise ValueError(
+            f"`n_groups={n_groups}` is smaller than the largest label "
+            f"({inferred_n_groups - 1})."
+        )
+    if n_groups < 2:
+        raise ValueError(
+            f"One-vs-rest requires at least 2 groups, got n_groups={n_groups}."
+        )
+
+    group_sizes = np.bincount(labels, minlength=n_groups).astype(np.int64)
+    empty = np.flatnonzero(group_sizes == 0)
+    if empty.size:
+        raise ValueError(f"Group id(s) {empty.tolist()} have no rows.")
+
+    return labels, n_groups, group_sizes
+
+
+def mannwhitneyu_one_vs_rest(
+    X,
+    labels,
+    n_groups=None,
+    use_continuity=True,
+    alternative="two-sided",
+    parallel_axis="auto",
+):
+    """Run a one-vs-rest Mann-Whitney U test across every group in one shot.
+
+    Generalizes ``mannwhitneyu_columns`` from a single pair of groups to N
+    groups tested simultaneously against "every other row" (the common
+    1-vs-rest / marker-feature workflow). Because ``group ∪ rest`` is always
+    the full input regardless of which group is being tested, each column is
+    ranked exactly **once** and every group's statistic is derived from that
+    single ranking — instead of the ``O(n_groups)`` blow-up a naive loop like
+    ``[mannwhitneyu_columns(X[labels == g], X[labels != g]) for g in groups]``
+    would pay by re-ranking ``group + rest`` from scratch for every group.
+
+    Parameters
+    ----------
+    X : array_like, shape (n_rows, n_cols)
+        All rows to compare — e.g. an expression matrix already restricted to
+        the rows that carry a valid label (drop unlabeled/NaN rows first).
+    labels : array_like, shape (n_rows,)
+        Integer group id for each row, in ``[0, n_groups)``. Every group must
+        have at least one row.
+    n_groups : int, optional
+        Number of groups. Defaults to ``labels.max() + 1``; pass explicitly
+        only if that would under-count (rare).
+    use_continuity : bool, optional
+        Whether a continuity correction (1/2) should be applied. Default True.
+    alternative : {'two-sided', 'less', 'greater'}, optional
+        Defines the alternative hypothesis. Default is 'two-sided'.
+    parallel_axis : {'auto', 'groups', 'columns'}, optional
+        Which axis the final reduction step parallelizes over — a pure
+        performance knob, never affects the result (every ``(group, column)``
+        statistic is computed independently). ``'auto'`` (default) picks
+        "groups" once ``n_groups`` reaches the number of numba threads —
+        benchmarks show it wins from there on regardless of ``n_cols``,
+        since "columns"'s strided access cost scales with ``n_groups``
+        independent of how parallel it runs. Below that thread-count
+        threshold (e.g. a handful of clusters tested against tens of
+        thousands of genes), it picks whichever of ``n_groups``/``n_cols`` is
+        larger, to keep as many threads busy as possible. Pass ``'groups'``
+        or ``'columns'`` explicitly to override the heuristic (e.g. after
+        profiling your own workload).
+
+    Returns
+    -------
+    result : MannWhitneyUResult
+        Named tuple with ``statistic`` and ``pvalue`` arrays of shape
+        ``(n_groups, n_cols)``. Row ``g`` is group ``g``'s test against every
+        other row in ``X``.
+    """
+    X = _validate_2d(X, "X")
+    labels, n_groups, group_sizes = _validate_labels(labels, X.shape[0], n_groups)
+    alt = _validate_alternative(alternative)
+    axis = _validate_parallel_axis(parallel_axis)
+    stats, pvals = _mannwhitneyu_one_vs_rest_columns(
+        X, labels, n_groups, group_sizes, use_continuity, alt, axis
+    )
+    return MannWhitneyUResult(stats, pvals)
+
+
 def _validate_csr(X, name):
     from scipy.sparse import issparse, isspmatrix_csr
 
@@ -163,12 +297,20 @@ def _validate_csr(X, name):
         raise TypeError(
             f"`{name}` must be in CSR format. Convert with `{name}.tocsr()` if needed."
         )
-    if X.data.size > 0 and X.data.min() < 0:
-        raise ValueError(
-            f"Sparse MWU requires non-negative data in `{name}`. "
-            "For data with negative values, convert to dense and use "
-            "mannwhitneyu_columns."
-        )
+    if X.data.size > 0:
+        if np.any(np.isnan(X.data)):
+            raise ValueError(f"`{name}` must not contain NaNs.")
+        if np.any(X.data < 0):
+            raise ValueError(
+                f"Sparse MWU requires non-negative data in `{name}`. "
+                "For data with negative values, convert to dense and use "
+                "mannwhitneyu_columns."
+            )
+        if np.any(X.data == 0):
+            raise ValueError(
+                f"`{name}` must not contain explicit zero entries. "
+                f"Call `{name}.eliminate_zeros()` first."
+            )
     return X
 
 
@@ -277,5 +419,76 @@ def mannwhitneyu_sparse(X, Y, use_continuity=True, alternative="two-sided"):
         idx_b.n_rows,
         use_continuity,
         alt,
+    )
+    return MannWhitneyUResult(stats, pvals)
+
+
+def mannwhitneyu_one_vs_rest_sparse(
+    X,
+    labels,
+    n_groups=None,
+    use_continuity=True,
+    alternative="two-sided",
+    parallel_axis="auto",
+):
+    """Sparse (CSR) counterpart of ``mannwhitneyu_one_vs_rest``.
+
+    Works directly on a single CSR matrix spanning every group — no need to
+    slice it into per-group matrices first — the sparse analogue of the dense
+    function's "rank once, not once per group" optimization. Zeros are
+    treated analytically (same zero-block trick as ``mannwhitneyu_sparse``),
+    so this requires non-negative data.
+
+    Parameters
+    ----------
+    X : csr_matrix or csr_array, shape (n_rows, n_cols)
+        Sparse matrix with non-negative values, covering every labeled row.
+        Call ``X.eliminate_zeros()`` beforehand if it may contain explicitly
+        stored zeros.
+    labels : array_like, shape (n_rows,)
+        Integer group id for each row, in ``[0, n_groups)``. Every group must
+        have at least one row.
+    n_groups : int, optional
+        Number of groups. Defaults to ``labels.max() + 1``.
+    use_continuity : bool, optional
+        Whether to apply continuity correction. Default True.
+    alternative : {'two-sided', 'less', 'greater'}, optional
+        Alternative hypothesis. Default 'two-sided'.
+    parallel_axis : {'auto', 'groups', 'columns'}, optional
+        See ``mannwhitneyu_one_vs_rest`` — a pure performance knob for the
+        final reduction step, never affects the result. ``'auto'`` (default)
+        picks whichever of ``n_groups``/``n_cols`` is larger.
+
+    Returns
+    -------
+    result : MannWhitneyUResult
+        Named tuple with ``statistic`` and ``pvalue`` arrays of shape
+        ``(n_groups, n_cols)``.
+    """
+    X = _validate_csr(X, "X")
+    n_rows = X.shape[0]
+    labels, n_groups, group_sizes = _validate_labels(labels, n_rows, n_groups)
+    alt = _validate_alternative(alternative)
+    axis = _validate_parallel_axis(parallel_axis)
+
+    data = np.ascontiguousarray(X.data, dtype=np.float64)
+    indptr = np.ascontiguousarray(X.indptr)
+    indices = np.ascontiguousarray(X.indices)
+    col_indptr, col_order, row_of_nnz = _build_col_index_with_rows(
+        indptr, indices, X.shape[1]
+    )
+
+    stats, pvals = _mannwhitneyu_one_vs_rest_sparse_batch(
+        data,
+        col_indptr,
+        col_order,
+        row_of_nnz,
+        labels,
+        n_groups,
+        group_sizes,
+        n_rows,
+        use_continuity,
+        alt,
+        axis,
     )
     return MannWhitneyUResult(stats, pvals)

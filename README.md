@@ -7,6 +7,8 @@ All functions use the asymptotic (normal approximation) method and produce resul
 
 > Note: This is only supported for 1D and 2D inputs.
 
+See [CHANGELOG.md](CHANGELOG.md) for release history.
+
 ## Installation
 
 ```bash
@@ -87,6 +89,28 @@ result = mannwhitneyu_sparse(X, Y)
 result.statistic  # shape (n_genes,)
 result.pvalue     # shape (n_genes,)
 ```
+
+### `mannwhitneyu_one_vs_rest(X, labels)` / `mannwhitneyu_one_vs_rest_sparse(X, labels)`
+
+Test every group against "all other rows" in one call — the common 1-vs-rest / marker-feature workflow — instead of looping `mannwhitneyu_columns(group, rest)` once per group.
+
+`group ∪ rest` is always the entire input regardless of which group is being tested, so each column is ranked **once** and every group's statistic is derived from that single ranking. The naive loop re-ranks `group + rest` from scratch for every group — `O(n_groups)` redundant work that this avoids entirely.
+
+`labels` is an integer array of group ids in `[0, n_groups)` (e.g. from `pd.factorize` or `pd.Categorical.codes`) — drop unlabeled/filtered rows before calling.
+
+```python
+from numba_mwu import mannwhitneyu_one_vs_rest, mannwhitneyu_one_vs_rest_sparse
+
+# expression: (n_cells, n_genes), labels: (n_cells,) int array in [0, n_groups)
+result = mannwhitneyu_one_vs_rest(expression, labels)
+result.statistic  # shape (n_groups, n_genes)
+result.pvalue     # shape (n_groups, n_genes)
+
+# Sparse (CSR) input — no need to slice into per-group matrices first
+sparse_result = mannwhitneyu_one_vs_rest_sparse(adata.X, labels)
+```
+
+Both functions accept `parallel_axis` (`"auto"` default, or `"groups"`/`"columns"`), which controls which axis the final reduction parallelizes over — a pure performance knob that never changes the result. Benchmarks showed `"groups"` wins once `n_groups` reaches the number of numba threads, regardless of `n_cols` (the strided access `"columns"` pays for scales with `n_groups`, not with how parallel it runs). `"auto"` picks `"groups"` past that threshold, and below it picks whichever of `n_groups`/`n_cols` is larger — e.g. with few groups but many genes (the common marker-gene case), parallelizing over columns instead keeps the thread pool busy.
 
 ## Benchmarks
 
