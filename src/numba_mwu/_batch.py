@@ -25,7 +25,7 @@ def _mannwhitneyu_rows(X, y, use_continuity, alternative):
     n_tests = X.shape[0]
     U_out = np.empty(n_tests, dtype=np.float64)
     p_out = np.empty(n_tests, dtype=np.float64)
-    for i in nb.prange(n_tests):  # type: ignore
+    for i in nb.prange(n_tests):
         U_out[i], p_out[i] = _mannwhitneyu_single(
             X[i].copy(), y, use_continuity, alternative
         )
@@ -53,7 +53,7 @@ def _mannwhitneyu_columns(X, Y, use_continuity, alternative):
     n_genes = X.shape[1]
     U_out = np.empty(n_genes, dtype=np.float64)
     p_out = np.empty(n_genes, dtype=np.float64)
-    for i in nb.prange(n_genes):  # type: ignore
+    for i in nb.prange(n_genes):
         x = X[:, i].copy()  # ensure contiguous
         y = Y[:, i].copy()
         U_out[i], p_out[i] = _mannwhitneyu_single(x, y, use_continuity, alternative)
@@ -91,7 +91,7 @@ def _one_vs_rest_rank_sums_dense(X, labels, n_groups):
     rank_sum = np.zeros((n_groups, n_cols), dtype=np.float64)
     tie_term = np.zeros(n_cols, dtype=np.float64)
 
-    for j in nb.prange(n_cols):  # type: ignore
+    for j in nb.prange(n_cols):
         col = np.empty(n_rows, dtype=np.float64)
         for i in range(n_rows):
             col[i] = X[i, j]
@@ -148,7 +148,7 @@ def _mwu_stats_one_vs_rest_by_group(
     U_out = np.empty((n_groups, n_cols), dtype=np.float64)
     p_out = np.empty((n_groups, n_cols), dtype=np.float64)
 
-    for g in nb.prange(n_groups):  # type: ignore
+    for g in nb.prange(n_groups):
         n1 = group_sizes[g]
         n2 = n_total - n1
         for j in range(n_cols):
@@ -175,7 +175,7 @@ def _mwu_stats_one_vs_rest_by_column(
     U_out = np.empty((n_groups, n_cols), dtype=np.float64)
     p_out = np.empty((n_groups, n_cols), dtype=np.float64)
 
-    for j in nb.prange(n_cols):  # type: ignore
+    for j in nb.prange(n_cols):
         tt = tie_term[j]
         for g in range(n_groups):
             n1 = group_sizes[g]
