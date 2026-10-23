@@ -199,10 +199,10 @@ def _validate_labels(labels, n_rows, n_groups):
         if np.any(labels != np.round(labels)):
             raise ValueError("`labels` must contain only integer-valued labels.")
     labels = labels.astype(np.int64)
-    if labels.min() < 0:
+    if np.min(labels) < 0:
         raise ValueError("`labels` must not contain negative values.")
 
-    inferred_n_groups = int(labels.max()) + 1
+    inferred_n_groups = int(np.max(labels)) + 1
     if n_groups is None:
         n_groups = inferred_n_groups
     elif n_groups < inferred_n_groups:

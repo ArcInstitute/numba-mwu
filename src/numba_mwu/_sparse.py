@@ -255,7 +255,7 @@ def _sparse_mwu_batch(
     U_out = np.empty(n_genes, dtype=np.float64)
     p_out = np.empty(n_genes, dtype=np.float64)
 
-    for j in nb.prange(n_genes):  # type: ignore
+    for j in nb.prange(n_genes):
         vals_a = _gather_col_vals(
             data_a, col_order_a, col_indptr_a[j], col_indptr_a[j + 1]
         )
@@ -298,7 +298,7 @@ def _one_vs_rest_rank_sums_sparse(
     rank_sum = np.zeros((n_groups, n_cols), dtype=np.float64)
     tie_term = np.zeros(n_cols, dtype=np.float64)
 
-    for j in nb.prange(n_cols):  # type: ignore
+    for j in nb.prange(n_cols):
         start = col_indptr[j]
         end = col_indptr[j + 1]
         nnz = end - start

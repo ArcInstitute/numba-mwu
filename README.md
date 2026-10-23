@@ -30,7 +30,7 @@ from numba_mwu import mannwhitneyu
 
 result = mannwhitneyu(x, y)
 result.statistic  # U statistic
-result.pvalue     # two-sided p-value
+result.pvalue  # two-sided p-value
 ```
 
 ### `mannwhitneyu_rows(X, y)`
@@ -44,7 +44,7 @@ from numba_mwu import mannwhitneyu_rows
 # X: (n_tests, n1), y: (n2,)
 result = mannwhitneyu_rows(X, y)
 result.statistic  # shape (n_tests,)
-result.pvalue     # shape (n_tests,)
+result.pvalue  # shape (n_tests,)
 ```
 
 ### `mannwhitneyu_columns(X, Y)`
@@ -62,7 +62,7 @@ Y = expression[labels == "B"]  # (n2, n_genes)
 
 result = mannwhitneyu_columns(X, Y)
 result.statistic  # shape (n_genes,)
-result.pvalue     # shape (n_genes,)
+result.pvalue  # shape (n_genes,)
 ```
 
 ### `mannwhitneyu_sparse(X, Y)`
@@ -81,13 +81,13 @@ from numba_mwu import mannwhitneyu_sparse
 
 # adata.X is a CSR matrix, adata.obs["group"] has labels
 mask = adata.obs["group"] == "A"
-X = adata.X[mask]    # CSR row-slice is still CSR
+X = adata.X[mask]  # CSR row-slice is still CSR
 Y = adata.X[~mask]
 
 
 result = mannwhitneyu_sparse(X, Y)
 result.statistic  # shape (n_genes,)
-result.pvalue     # shape (n_genes,)
+result.pvalue  # shape (n_genes,)
 ```
 
 ### `mannwhitneyu_one_vs_rest(X, labels)` / `mannwhitneyu_one_vs_rest_sparse(X, labels)`
@@ -104,7 +104,7 @@ from numba_mwu import mannwhitneyu_one_vs_rest, mannwhitneyu_one_vs_rest_sparse
 # expression: (n_cells, n_genes), labels: (n_cells,) int array in [0, n_groups)
 result = mannwhitneyu_one_vs_rest(expression, labels)
 result.statistic  # shape (n_groups, n_genes)
-result.pvalue     # shape (n_groups, n_genes)
+result.pvalue  # shape (n_groups, n_genes)
 
 # Sparse (CSR) input — no need to slice into per-group matrices first
 sparse_result = mannwhitneyu_one_vs_rest_sparse(adata.X, labels)
